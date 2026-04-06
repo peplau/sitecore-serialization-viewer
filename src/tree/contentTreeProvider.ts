@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { exec as execCallback } from 'child_process';
+import { promisify } from 'util';
 import { SitecoreTreeItem } from './treeItem';
 import { SitecoreItem, SerializationStatus } from './models';
 import { AuthoringGraphqlClient } from '../sitecore/previewGraphqlClient';
@@ -9,6 +11,8 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
   private client: AuthoringGraphqlClient;
   private cache: Map<string, SitecoreItem[]> = new Map();
+  private explainStatusCache: Map<string, SerializationStatus> = new Map();
+  private readonly exec = promisify(execCallback);
 
   constructor() {
     this.client = new AuthoringGraphqlClient();
@@ -80,6 +84,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       const result = await this.client.getChildren(basePath);
       // Filter out any children that are the same as parent (self-reference)
       items = (result || []).filter((item: SitecoreItem) => item.path !== basePath);
+      items = await this.reconcileIndirectStatuses(items);
 
       if (items.length === 0) {
         console.warn(`No children returned from GraphQL for ${basePath}`);
@@ -99,6 +104,58 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
   refresh(): void {
     this.cache.clear();
+    this.explainStatusCache.clear();
     this._onDidChangeTreeData.fire();
+  }
+
+  private async reconcileIndirectStatuses(items: SitecoreItem[]): Promise<SitecoreItem[]> {
+    const updated = [...items];
+
+    for (let i = 0; i < updated.length; i++) {
+      const item = updated[i];
+      if (item.status !== SerializationStatus.Indirect) {
+        continue;
+      }
+
+      const resolvedStatus = await this.getExplainBasedStatus(item.path);
+      if (resolvedStatus && resolvedStatus !== item.status) {
+        updated[i] = {
+          ...item,
+          status: resolvedStatus
+        };
+      }
+    }
+
+    return updated;
+  }
+
+  private async getExplainBasedStatus(itemPath: string): Promise<SerializationStatus | undefined> {
+    const cached = this.explainStatusCache.get(itemPath);
+    if (cached) {
+      return cached;
+    }
+
+    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+      return undefined;
+    }
+
+    const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
+    const command = `dotnet sitecore ser explain -p "${itemPath}"`;
+
+    try {
+      const { stdout, stderr } = await this.exec(command, { cwd: workspaceRoot, timeout: 10000 });
+      const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
+
+      if (/not included in any module configuration|\snot included[.!]?/i.test(text)) {
+        this.explainStatusCache.set(itemPath, SerializationStatus.NotSerialized);
+        return SerializationStatus.NotSerialized;
+      }
+
+      this.explainStatusCache.set(itemPath, SerializationStatus.Indirect);
+      return SerializationStatus.Indirect;
+    } catch {
+      // Keep original status if explain cannot run.
+      return undefined;
+    }
   }
 }

@@ -106,6 +106,10 @@ export class ExplainPanel {
 			? parsed.reasons.map(line => `<li>${this.escapeHtml(line)}</li>`).join('')
 			: '<li>No explain output available.</li>';
 
+		const moduleSection = parsed.moduleName !== 'Unknown'
+			? `<section>\n\t<h1>Module</h1>\n\t<p><a href="#" id="open-module-json" data-module="${this.escapeHtml(parsed.moduleName)}">${this.escapeHtml(parsed.moduleName)}</a>${parsed.moduleDescription ? ` - ${this.escapeHtml(parsed.moduleDescription)}` : ''}</p>\n</section>`
+			: '';
+
 		const yamlFileName = parsed.yamlPath ? parsed.yamlPath.replace(/.*[\\/]/, '') : undefined;
 		const yamlSection = yamlFileName
 			? `<section>\n\t<h1>YAML</h1>\n\t<p><a href=\"#\" id=\"open-yaml\" data-path=\"${this.escapeHtml(parsed.yamlPath!)}\">${this.escapeHtml(yamlFileName)}</a></p>\n</section>`
@@ -139,6 +143,7 @@ a:hover { text-decoration: underline; }
 	<h1>Status</h1>
 	<p>${this.escapeHtml(parsed.status)}</p>
 </section>
+${moduleSection}
 <section>
 	<h1>Reason</h1>
 	<ul>${reasonHtml}</ul>
@@ -156,6 +161,20 @@ ${yamlSection}
 				const yamlPath = target.getAttribute('data-path');
 				if (yamlPath) {
 					vscode.postMessage({ command: 'openYaml', yamlPath });
+				}
+			}
+		});
+	}
+
+	const openModuleJsonButton = document.getElementById('open-module-json');
+	if (openModuleJsonButton) {
+		openModuleJsonButton.addEventListener('click', event => {
+			event.preventDefault();
+			const target = event.currentTarget;
+			if (target instanceof HTMLElement) {
+				const moduleName = target.getAttribute('data-module');
+				if (moduleName) {
+					vscode.postMessage({ command: 'openModuleJson', moduleName });
 				}
 			}
 		});

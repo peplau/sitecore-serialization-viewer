@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { SitecoreItem, SerializationStatus } from '../tree/models';
+import { SerializationConfigService } from './serializationConfigService';
 
 interface GraphqlResponse<T> {
   data?: T;
@@ -172,19 +173,27 @@ export class AuthoringGraphqlClient {
 
     console.log(`GraphQL query for ${normalizedPath}: received ${children.length} children`);
 
+    const serializationService = SerializationConfigService.getInstance();
     const items = children
       .filter(child => child.path !== normalizedPath) // Prevent self-reference
-      .map(child => ({
-        id: child.itemId,
-        name: child.name,
-        path: child.path,
-        templateId: undefined,
-        templateName: child.template?.name,
-        sortOrder: undefined,
-        displayName: undefined,
-        hasChildren: (child.children?.nodes?.length ?? 0) > 0,
-        status: SerializationStatus.NotSerialized
-      }));
+      .map(child => {
+        // Check if item is part of serialization
+        const serializationMatch = serializationService.checkSerializationStatus(child.path);
+
+        return {
+          id: child.itemId,
+          name: child.name,
+          path: child.path,
+          templateId: undefined,
+          templateName: child.template?.name,
+          sortOrder: undefined,
+          displayName: undefined,
+          hasChildren: (child.children?.nodes?.length ?? 0) > 0,
+          status: serializationMatch?.status ?? SerializationStatus.Untracked,
+          yamlPath: serializationMatch?.yamlPath,
+          matchedModule: serializationMatch?.moduleName
+        };
+      });
 
     // Sort by sortOrder (ascending), but handle -1 (unsorted) and other values
     // Then by name as tiebreaker

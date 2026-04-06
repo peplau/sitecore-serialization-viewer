@@ -1,0 +1,74 @@
+{
+  "modules": [
+    {
+      "name": "nextjs-starter",
+      "subtrees": [
+        {
+          "key": "DefaultRenderingHost",
+          "path": "/sitecore/system/Settings/Services/Rendering Hosts/Default",
+          "scope": "SingleItem"
+        }
+      ]
+    },
+    {
+      "name": "Project.click-click-launch",
+      "subtrees": [
+        { "key": "ccl.templates", "path": "/sitecore/templates/Project/click-click-launch" },
+        { "key": "ccl.templates.branches", "path": "/sitecore/templates/Branches/Project/click-click-launch" },
+        { "key": "ccl.modules", "path": "/sitecore/system/settings/Project/click-click-launch" },
+        { "key": "ccl.renderings", "path": "/sitecore/Layout/Renderings/Project/click-click-launch" },
+        { "key": "ccl.placeholderSettings", "path": "/sitecore/Layout/Placeholder Settings/Project/click-click-launch" },
+        { "key": "ccl.powershell", "path": "/sitecore/system/Modules/PowerShell/Script Library/Click Click Launch" },
+        { "key": "ccl.media.fd", "path": "/sitecore/media library/Feature/Alaris" },
+        { "key": "ccl.media.ms", "path": "/sitecore/media library/Feature/Solterra" },
+        { "key": "ccl.media.bp", "path": "/sitecore/media library/Feature/SYNC" }
+      ]
+    },
+    {
+      "name": "Vizient.Common",
+      "subtrees": [
+        { "key": "System.Settings.Vizient.Common", "path": "/sitecore/system/Settings/Feature/vizient/Components/Common" },
+        { "key": "Templates.Feature.Vizient.Common", "path": "/sitecore/templates/Feature/vizient/Components/Common" },
+        { "key": "Templates.Branches.Vizient.Common", "path": "/sitecore/templates/Branches/Feature/vizient/Components/Common" },
+        { "key": "Layout.Renderings.Vizient.Common", "path": "/sitecore/layout/Renderings/Feature/vizient/Components/Common" },
+        { "key": "Layout.Placeholders.Vizient.Common", "path": "/sitecore/layout/Placeholder Settings/Feature/vizient/Components/Common" }
+      ]
+    },
+    {
+      "name": "Vizient.Heroes",
+      "subtrees": [
+        { "key": "System.Settings.Vizient.Heroes", "path": "/sitecore/system/Settings/Feature/vizient/Components/Heroes" },
+        { "key": "Templates.Feature.Vizient.Heroes", "path": "/sitecore/templates/Feature/vizient/Components/Heroes" },
+        { "key": "Templates.Branches.Vizient.Heroes", "path": "/sitecore/templates/Branches/Feature/vizient/Components/Heroes" },
+        { "key": "Layout.Renderings.Vizient.Heroes", "path": "/sitecore/layout/Renderings/Feature/vizient/Components/Heroes" },
+        { "key": "Layout.Placeholders.Vizient.Heroes", "path": "/sitecore/layout/Placeholder Settings/Feature/vizient/Components/Heroes" }
+      ]
+    },
+    {
+      "name": "vizient.media-full-width",
+      "subtrees": [
+        { "key": "Templates.Components.MediaFullWidth", "path": "/sitecore/templates/Feature/vizient/Components/Media Full Width" },
+        { "key": "Renderings.Components.MediaFullWidth", "path": "/sitecore/layout/Renderings/Feature/Vizient/Components/Media Full Width" }
+      ]
+    },
+    {
+      "name": "_Vizient.Main",
+      "subtrees": [
+        { "key": "System.Settings.Project.Vizient", "path": "/sitecore/system/Settings/Project/vizient" },
+        { "key": "System.Settings.Feature.Vizient", "path": "/sitecore/system/Settings/Feature/vizient", "scope": "ItemAndChildren" },
+        { "key": "Templates.Project.Vizient", "path": "/sitecore/templates/Project/vizient", "scope": "SingleItem" },
+        { "key": "Templates.Project.Vizient.Base", "path": "/sitecore/templates/Project/vizient/Base" },
+        { "key": "Templates.Feature.Vizient", "path": "/sitecore/templates/Feature/vizient", "scope": "ItemAndChildren" },
+        { "key": "Templates.Branches.Project.Vizient", "path": "/sitecore/templates/Branches/Project/vizient", "scope": "SingleItem" },
+        { "key": "Templates.Branches.Feature.Vizient", "path": "/sitecore/templates/Branches/Feature/vizient", "scope": "ItemAndChildren" },
+        { "key": "Media.Project.Vizient", "path": "/sitecore/Media Library/Project/vizient" },
+        { "key": "Layout.Renderings.Project.Vizient", "path": "/sitecore/layout/Renderings/Project/vizient", "scope": "SingleItem" },
+        { "key": "Layout.Renderings.Feature.Vizient", "path": "/sitecore/layout/Renderings/Feature/vizient", "scope": "ItemAndChildren" },
+        { "key": "Layout.Placeholders.Project.Vizient", "path": "/sitecore/layout/Placeholder Settings/Project/vizient", "scope": "SingleItem" },
+        { "key": "Layout.Placeholders.Feature.Vizient", "path": "/sitecore/layout/Placeholder Settings/Feature/vizient", "scope": "ItemAndChildren" },
+        { "key": "Content.Tenant.Vizient", "path": "/sitecore/content/vizient", "scope": "SingleItem" },
+        { "key": "Content.Site.Vizient", "path": "/sitecore/content/vizient/vizient-website" }
+      ]
+    }
+  ]
+}

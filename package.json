@@ -51,10 +51,6 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "sitecore-serialization-viewer.explainItem",
-        "title": "Explain Item"
-      },
-      {
         "command": "sitecore-serialization-viewer.openYaml",
         "title": "Open Serialized YAML"
       },
@@ -86,12 +82,7 @@
         }
       ],
       "view/item/context": [
-        {
-          "command": "sitecore-serialization-viewer.explainItem",
-          "when": "view == sitecoreContentTree",
-          "group": "inline"
-        },
-        {
+          {
           "command": "sitecore-serialization-viewer.openYaml",
           "when": "view == sitecoreContentTree && viewItem =~ /serialized/",
           "group": "inline"

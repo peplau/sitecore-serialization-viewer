@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
+import { exec as execCallback } from 'child_process';
+import { promisify } from 'util';
 import { ContentTreeProvider } from './tree/contentTreeProvider';
 import { SitecoreItem } from './tree/models';
 import { SitecoreTreeItem } from './tree/treeItem';
+import { ExplainPanel } from './explainPanel';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -18,13 +21,6 @@ export function activate(context: vscode.ExtensionContext) {
 	// Register commands
 	const refreshTreeCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.refreshTree', () => {
 		treeProvider.refresh();
-	});
-
-	const explainItemCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.explainItem', (item: SitecoreTreeItem) => {
-		if (item) {
-			vscode.window.showInformationMessage(`Explaining: ${item.item.path}`);
-			// TODO: Run CLI explain command
-		}
 	});
 
 	const openYamlCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.openYaml', (item: SitecoreTreeItem) => {

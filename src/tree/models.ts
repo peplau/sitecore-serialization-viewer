@@ -1,7 +1,8 @@
 export enum SerializationStatus {
   NotSerialized = 'not-serialized',
   Direct = 'direct',
-  Indirect = 'indirect'
+  Indirect = 'indirect',
+  Untracked = 'untracked'
 }
 
 export interface SitecoreItem {

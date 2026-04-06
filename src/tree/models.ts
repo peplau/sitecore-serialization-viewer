@@ -19,5 +19,12 @@ export interface SitecoreItem {
   status: SerializationStatus;
   yamlPath?: string;
   matchedModule?: string;
+  moduleDescription?: string;
+  moduleJsonPath?: string;
+  subtreeKey?: string;
+  subtreePath?: string;
+  subtreeScope?: string;
+  subtreePushOperations?: string;
+  subtreeDatabase?: string;
   pushOperations?: string;
 }

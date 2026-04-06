@@ -191,7 +191,14 @@ export class AuthoringGraphqlClient {
           hasChildren: (child.children?.nodes?.length ?? 0) > 0,
           status: serializationMatch?.status ?? SerializationStatus.Untracked,
           yamlPath: serializationMatch?.yamlPath,
-          matchedModule: serializationMatch?.moduleName
+          matchedModule: serializationMatch?.moduleName,
+          moduleDescription: serializationMatch?.moduleDescription,
+          moduleJsonPath: serializationMatch ? serializationService.resolveModuleJsonPath(serializationMatch.moduleName) : undefined,
+          subtreeKey: serializationMatch?.subtreeKey,
+          subtreePath: serializationMatch?.subtreePath,
+          subtreeScope: serializationMatch?.subtreeScope,
+          subtreePushOperations: serializationMatch?.subtreePushOperations,
+          subtreeDatabase: serializationMatch?.subtreeDatabase
         };
       });
 

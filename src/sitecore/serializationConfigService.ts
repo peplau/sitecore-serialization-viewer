@@ -4,8 +4,12 @@ import serializationConfig from './serializationConfig.json';
 export interface SerializationMatch {
   status: SerializationStatus;
   moduleName: string;
+  moduleDescription?: string;
   subtreeKey: string;
   subtreePath: string;
+  subtreeScope?: string;
+  subtreePushOperations?: string;
+  subtreeDatabase?: string;
   yamlPath: string;
 }
 
@@ -47,8 +51,12 @@ export class SerializationConfigService {
           return {
             status: SerializationStatus.Direct,
             moduleName: module.name,
+            moduleDescription: module.description,
             subtreeKey: subtree.key,
             subtreePath: subtree.path,
+            subtreeScope: subtree.scope,
+            subtreePushOperations: subtree.pushOperations,
+            subtreeDatabase: subtree.database,
             yamlPath: `${module.name}/${subtree.key}` // Simplified yml path reference
           };
         }
@@ -60,8 +68,12 @@ export class SerializationConfigService {
             return {
               status: SerializationStatus.Indirect,
               moduleName: module.name,
+              moduleDescription: module.description,
               subtreeKey: subtree.key,
               subtreePath: subtree.path,
+              subtreeScope: subtree.scope,
+              subtreePushOperations: subtree.pushOperations,
+              subtreeDatabase: subtree.database,
               yamlPath: ''
             };
           }
@@ -91,5 +103,19 @@ export class SerializationConfigService {
       }
     }
     return paths;
+  }
+
+  getModuleByName(moduleName: string) {
+    return this.config.modules.find((module: any) => module.name === moduleName);
+  }
+
+  resolveModuleJsonPath(moduleName: string): string {
+    const module = this.getModuleByName(moduleName);
+    if (module?.jsonPath) {
+      return module.jsonPath;
+    }
+
+    const normalizedName = moduleName.toLowerCase();
+    return `serialization/${normalizedName}/${normalizedName}.json`;
   }
 }

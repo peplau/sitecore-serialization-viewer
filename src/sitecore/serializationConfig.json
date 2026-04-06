@@ -53,21 +53,22 @@
     },
     {
       "name": "_Vizient.Main",
+      "description": "Foundational items for the Vizient website",
       "subtrees": [
-        { "key": "System.Settings.Project.Vizient", "path": "/sitecore/system/Settings/Project/vizient" },
-        { "key": "System.Settings.Feature.Vizient", "path": "/sitecore/system/Settings/Feature/vizient", "scope": "ItemAndChildren" },
-        { "key": "Templates.Project.Vizient", "path": "/sitecore/templates/Project/vizient", "scope": "SingleItem" },
-        { "key": "Templates.Project.Vizient.Base", "path": "/sitecore/templates/Project/vizient/Base" },
-        { "key": "Templates.Feature.Vizient", "path": "/sitecore/templates/Feature/vizient", "scope": "ItemAndChildren" },
-        { "key": "Templates.Branches.Project.Vizient", "path": "/sitecore/templates/Branches/Project/vizient", "scope": "SingleItem" },
-        { "key": "Templates.Branches.Feature.Vizient", "path": "/sitecore/templates/Branches/Feature/vizient", "scope": "ItemAndChildren" },
-        { "key": "Media.Project.Vizient", "path": "/sitecore/Media Library/Project/vizient" },
-        { "key": "Layout.Renderings.Project.Vizient", "path": "/sitecore/layout/Renderings/Project/vizient", "scope": "SingleItem" },
-        { "key": "Layout.Renderings.Feature.Vizient", "path": "/sitecore/layout/Renderings/Feature/vizient", "scope": "ItemAndChildren" },
-        { "key": "Layout.Placeholders.Project.Vizient", "path": "/sitecore/layout/Placeholder Settings/Project/vizient", "scope": "SingleItem" },
-        { "key": "Layout.Placeholders.Feature.Vizient", "path": "/sitecore/layout/Placeholder Settings/Feature/vizient", "scope": "ItemAndChildren" },
-        { "key": "Content.Tenant.Vizient", "path": "/sitecore/content/vizient", "scope": "SingleItem" },
-        { "key": "Content.Site.Vizient", "path": "/sitecore/content/vizient/vizient-website" }
+        { "key": "System.Settings.Project.Vizient", "path": "/sitecore/system/Settings/Project/vizient", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "System.Settings.Feature.Vizient", "path": "/sitecore/system/Settings/Feature/vizient", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Templates.Project.Vizient", "path": "/sitecore/templates/Project/vizient", "scope": "SingleItem", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Templates.Project.Vizient.Base", "path": "/sitecore/templates/Project/vizient/Base", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Templates.Feature.Vizient", "path": "/sitecore/templates/Feature/vizient", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Templates.Branches.Project.Vizient", "path": "/sitecore/templates/Branches/Project/vizient", "scope": "SingleItem", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Templates.Branches.Feature.Vizient", "path": "/sitecore/templates/Branches/Feature/vizient", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Media.Project.Vizient", "path": "/sitecore/Media Library/Project/vizient", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Layout.Renderings.Project.Vizient", "path": "/sitecore/layout/Renderings/Project/vizient", "scope": "SingleItem", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Layout.Renderings.Feature.Vizient", "path": "/sitecore/layout/Renderings/Feature/vizient", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Layout.Placeholders.Project.Vizient", "path": "/sitecore/layout/Placeholder Settings/Project/vizient", "scope": "SingleItem", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Layout.Placeholders.Feature.Vizient", "path": "/sitecore/layout/Placeholder Settings/Feature/vizient", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Content.Tenant.Vizient", "path": "/sitecore/content/vizient", "scope": "SingleItem", "pushOperations": "CreateAndUpdate", "database": "master" },
+        { "key": "Content.Site.Vizient", "path": "/sitecore/content/vizient/vizient-website", "scope": "ItemAndChildren", "pushOperations": "CreateAndUpdate", "database": "master" }
       ]
     }
   ]

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { exec as execCallback } from 'child_process';
 import { promisify } from 'util';
 import { ContentTreeProvider } from './tree/contentTreeProvider';
@@ -23,11 +24,9 @@ export function activate(context: vscode.ExtensionContext) {
 		treeProvider.refresh();
 	});
 
-	const openYamlCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.openYaml', (item: SitecoreTreeItem) => {
+	const openYamlCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.openYaml', async (item: SitecoreTreeItem) => {
 		if (item && item.item.yamlPath) {
-			vscode.workspace.openTextDocument(item.item.yamlPath).then(doc => {
-				vscode.window.showTextDocument(doc);
-			});
+			await openYamlFile(item.item.yamlPath);
 		} else {
 			vscode.window.showInformationMessage('No YAML file available for this item.');
 		}
@@ -40,10 +39,115 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	const showDetailsCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.showDetails', (item: SitecoreItem) => {
-		// TODO: Open details panel/webview
-		vscode.window.showInformationMessage(`Details for: ${item.path}\nStatus: ${item.status}\nModule: ${item.matchedModule || 'None'}`);
+	const exec = promisify(execCallback);
+
+	const showDetailsCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.showDetails', async (item: SitecoreItem) => {
+		const panel = ExplainPanel.createOrShow(context.extensionUri);
+		const explainResult = await runSitecoreExplain(item.path);
+		panel.update(item, explainResult);
 	});
+
+	vscode.window.registerWebviewPanelSerializer('sitecoreSerializationExplain', {
+		deserializeWebviewPanel: async (panel, state) => {
+			// No-op for now
+		}
+	});
+
+	vscode.window.onDidReceiveMessage?.(async (message) => {
+		if (message.command === 'openIncludeInJson' && message.includeName && message.jsonPath) {
+			const workspaceFolders = vscode.workspace.workspaceFolders;
+			if (!workspaceFolders || workspaceFolders.length === 0) {
+				vscode.window.showErrorMessage('No workspace is open to resolve JSON file.');
+				return;
+			}
+			const rootFolder = workspaceFolders[0].uri.fsPath;
+			const candidatePaths = [message.jsonPath, path.join(rootFolder, message.jsonPath)];
+			let foundUri: vscode.Uri | undefined;
+			for (const candidate of candidatePaths) {
+				try {
+					const uri = vscode.Uri.file(candidate);
+					await vscode.workspace.openTextDocument(uri);
+					foundUri = uri;
+					break;
+				} catch {
+					foundUri = undefined;
+				}
+			}
+			if (!foundUri) {
+				const results = await vscode.workspace.findFiles('**/*.json', '**/node_modules/**', 200);
+				foundUri = results.find(uri => uri.fsPath.toLowerCase().includes(message.jsonPath.toLowerCase()));
+			}
+			if (foundUri) {
+				const doc = await vscode.workspace.openTextDocument(foundUri);
+				const editor = await vscode.window.showTextDocument(doc);
+				const text = doc.getText();
+				const lines = text.split(/\r?\n/);
+				const idx = lines.findIndex(line => line.includes(message.includeName));
+				if (idx >= 0) {
+					const pos = new vscode.Position(idx, 0);
+					editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+					editor.selection = new vscode.Selection(pos, pos);
+				}
+				return;
+			}
+			vscode.window.showErrorMessage(`Unable to open JSON file or find include: ${message.includeName}`);
+		}
+	});
+
+	async function openYamlFile(yamlPath: string): Promise<void> {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (!workspaceFolders || workspaceFolders.length === 0) {
+			vscode.window.showErrorMessage('No workspace is open to resolve YAML file.');
+			return;
+		}
+
+		const rootFolder = workspaceFolders[0].uri.fsPath;
+		const candidatePaths = [yamlPath, path.join(rootFolder, yamlPath)];
+		let foundUri: vscode.Uri | undefined;
+
+		for (const candidate of candidatePaths) {
+			try {
+				foundUri = vscode.Uri.file(candidate);
+				await vscode.workspace.openTextDocument(foundUri);
+				break;
+			} catch {
+				foundUri = undefined;
+			}
+		}
+
+		if (!foundUri) {
+			const searchTerm = yamlPath.replace(/\\/g, '/').toLowerCase();
+			const results = await vscode.workspace.findFiles('**/*.{yml,yaml}', '**/node_modules/**', 200);
+			foundUri = results.find(uri => uri.fsPath.toLowerCase().includes(searchTerm));
+			if (!foundUri) {
+				const basename = path.basename(yamlPath).toLowerCase();
+				foundUri = results.find(uri => uri.fsPath.toLowerCase().endsWith(basename));
+			}
+		}
+
+		if (foundUri) {
+			const doc = await vscode.workspace.openTextDocument(foundUri);
+			await vscode.window.showTextDocument(doc);
+			return;
+		}
+
+		vscode.window.showErrorMessage(`Unable to open YAML file: ${yamlPath}`);
+	}
+
+	async function runSitecoreExplain(path: string): Promise<string> {
+		if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+			return 'No workspace open to run dotnet sitecore explain.';
+		}
+
+		const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
+		const command = `dotnet sitecore ser explain -p "${path}"`;
+		try {
+			const { stdout, stderr } = await exec(command, { cwd: workspaceRoot, timeout: 30000 });
+			return stdout.trim() || stderr.trim();
+		} catch (error: any) {
+			return `Error running explain command: ${error.message || String(error)}`;
+		}
+	}
 
 	// The command has been defined in the package.json file
 	// Now provide the implementation of the command with registerCommand
@@ -57,7 +161,6 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		disposable,
 		refreshTreeCommand,
-		explainItemCommand,
 		openYamlCommand,
 		copyPathCommand,
 		showDetailsCommand

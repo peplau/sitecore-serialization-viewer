@@ -18,15 +18,25 @@
       "type": "object",
       "title": "Sitecore Serialization Viewer",
       "properties": {
-        "sitecoreSerializationViewer.previewGraphqlUrl": {
+        "sitecoreSerializationViewer.authoringGraphqlUrl": {
           "type": "string",
           "default": "",
-          "description": "Optional full Preview GraphQL URL for Sitecore (e.g., https://<hostname>/sitecore/api/graph/edge?sc_site=<site>)"
+          "description": "Optional full Authoring GraphQL URL for Sitecore (e.g., https://<hostname>/sitecore/api/authoring/graphql/v1/)"
         },
         "sitecoreSerializationViewer.defaultSiteName": {
           "type": "string",
           "default": "my-website",
           "description": "Default site name for GraphQL preview (fallback/environment variable NEXT_PUBLIC_DEFAULT_SITE_NAME)"
+        },
+        "sitecoreSerializationViewer.defaultLanguage": {
+          "type": "string",
+          "default": "en",
+          "description": "Default Sitecore language for GraphQL requests (fallback/environment variable LANGUAGE)"
+        },
+        "sitecoreSerializationViewer.defaultDatabase": {
+          "type": "string",
+          "default": "master",
+          "description": "Default Sitecore database for GraphQL requests (fallback/environment variable SITECORE_DATABASE)"
         }
       }
     },
@@ -61,9 +71,9 @@
       "explorer": [
         {
           "id": "sitecoreContentTree",
-          "name": "Sitecore Content Tree",
+          "name": "Sitecore Serialization Viewer",
           "icon": "$(folder)",
-          "contextualTitle": "Sitecore Content Tree"
+          "contextualTitle": "Sitecore Serialization Viewer"
         }
       ]
     },

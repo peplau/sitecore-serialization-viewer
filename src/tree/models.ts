@@ -10,6 +10,10 @@ export interface SitecoreItem {
   path: string;
   templateId?: string;
   templateName?: string;
+  sortOrder?: number;
+  displayName?: string;
+  created?: string;
+  updated?: string;
   hasChildren: boolean;
   status: SerializationStatus;
   yamlPath?: string;

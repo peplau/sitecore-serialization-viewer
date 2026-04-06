@@ -1,21 +1,20 @@
 import * as vscode from 'vscode';
 import { SitecoreTreeItem } from './treeItem';
 import { SitecoreItem, SerializationStatus } from './models';
-import { PreviewGraphqlClient } from '../sitecore/previewGraphqlClient';
+import { AuthoringGraphqlClient } from '../sitecore/previewGraphqlClient';
 
 export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<SitecoreTreeItem | undefined | void> = new vscode.EventEmitter<SitecoreTreeItem | undefined | void>();
   readonly onDidChangeTreeData: vscode.Event<SitecoreTreeItem | undefined | void> = this._onDidChangeTreeData.event;
 
-  private client: PreviewGraphqlClient;
+  private client: AuthoringGraphqlClient;
   private cache: Map<string, SitecoreItem[]> = new Map();
 
   constructor() {
-    this.client = new PreviewGraphqlClient();
+    this.client = new AuthoringGraphqlClient();
   }
 
   private readonly fallbackMockData: SitecoreItem[] = [
-  private fallbackMockData: SitecoreItem[] = [
     {
       id: '1',
       name: 'sitecore',
@@ -54,33 +53,40 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   }
 
   async getChildren(element?: SitecoreTreeItem): Promise<SitecoreTreeItem[]> {
-    const basePath = element?.item.path || '/sitecore';
+    // If no element, return the root /sitecore node
+    if (!element) {
+      const rootItem: SitecoreItem = {
+        id: 'sitecore-root',
+        name: 'sitecore',
+        path: '/sitecore',
+        hasChildren: true,
+        status: SerializationStatus.NotSerialized
+      };
+      return [new SitecoreTreeItem(rootItem, vscode.TreeItemCollapsibleState.Collapsed)];
+    }
+
+    const basePath = element.item.path;
 
     if (this.cache.has(basePath)) {
-      return this.cache.get(basePath)!.map(item => new SitecoreTreeItem(
+      const cachedItems = this.cache.get(basePath) || [];
+      return cachedItems.map(item => new SitecoreTreeItem(
         item,
         item.hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
       ));
     }
 
-    let items: SitecoreItem[];
+    let items: SitecoreItem[] = [];
     try {
-      items = await this.client.getChildren(basePath);
-      if (!items || items.length === 0) {
-        // Keep the mock fallback if GraphQL returns empty
-        throw new Error('No children returned from Preview GraphQL');
+      const result = await this.client.getChildren(basePath);
+      // Filter out any children that are the same as parent (self-reference)
+      items = (result || []).filter((item: SitecoreItem) => item.path !== basePath);
+
+      if (items.length === 0) {
+        console.warn(`No children returned from GraphQL for ${basePath}`);
       }
     } catch (error) {
       console.warn(`GraphQL load failed for path ${basePath}:`, error);
-      vscode.window.showWarningMessage(`Sitecore GraphQL load failed (${basePath}). Using local fallback. ${error instanceof Error ? error.message : ''}`);
-
-      if (!element) {
-        items = this.fallbackMockData.filter(item => item.path.split('/').length === 2);
-      } else {
-        const parentPath = element.item.path;
-        items = this.fallbackMockData
-          .filter(item => item.path.startsWith(parentPath + '/') && item.path.split('/').length === parentPath.split('/').length + 1);
-      }
+      vscode.window.showWarningMessage(`Sitecore GraphQL load failed (${basePath}). ${error instanceof Error ? error.message : ''}`);
     }
 
     this.cache.set(basePath, items);
@@ -92,6 +98,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   }
 
   refresh(): void {
+    this.cache.clear();
     this._onDidChangeTreeData.fire();
   }
 }

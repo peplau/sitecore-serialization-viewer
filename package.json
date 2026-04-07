@@ -51,10 +51,6 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "sitecore-serialization-viewer.openYaml",
-        "title": "Open Serialized YAML"
-      },
-      {
         "command": "sitecore-serialization-viewer.copyPath",
         "title": "Copy Sitecore Path"
       },
@@ -82,11 +78,6 @@
         }
       ],
       "view/item/context": [
-          {
-          "command": "sitecore-serialization-viewer.openYaml",
-          "when": "view == sitecoreContentTree && viewItem =~ /serialized/",
-          "group": "inline"
-        },
         {
           "command": "sitecore-serialization-viewer.copyPath",
           "when": "view == sitecoreContentTree",

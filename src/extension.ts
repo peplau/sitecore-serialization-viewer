@@ -24,14 +24,6 @@ export function activate(context: vscode.ExtensionContext) {
 		treeProvider.refresh();
 	});
 
-	const openYamlCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.openYaml', async (item: SitecoreTreeItem) => {
-		if (item && item.item.yamlPath) {
-			await openYamlFile(item.item.yamlPath);
-		} else {
-			vscode.window.showInformationMessage('No YAML file available for this item.');
-		}
-	});
-
 	const copyPathCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.copyPath', (item: SitecoreTreeItem) => {
 		if (item) {
 			vscode.env.clipboard.writeText(item.item.path);
@@ -94,46 +86,6 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	async function openYamlFile(yamlPath: string): Promise<void> {
-		const workspaceFolders = vscode.workspace.workspaceFolders;
-		if (!workspaceFolders || workspaceFolders.length === 0) {
-			vscode.window.showErrorMessage('No workspace is open to resolve YAML file.');
-			return;
-		}
-
-		const rootFolder = workspaceFolders[0].uri.fsPath;
-		const candidatePaths = [yamlPath, path.join(rootFolder, yamlPath)];
-		let foundUri: vscode.Uri | undefined;
-
-		for (const candidate of candidatePaths) {
-			try {
-				foundUri = vscode.Uri.file(candidate);
-				await vscode.workspace.openTextDocument(foundUri);
-				break;
-			} catch {
-				foundUri = undefined;
-			}
-		}
-
-		if (!foundUri) {
-			const searchTerm = yamlPath.replace(/\\/g, '/').toLowerCase();
-			const results = await vscode.workspace.findFiles('**/*.{yml,yaml}', '**/node_modules/**', 200);
-			foundUri = results.find(uri => uri.fsPath.toLowerCase().includes(searchTerm));
-			if (!foundUri) {
-				const basename = path.basename(yamlPath).toLowerCase();
-				foundUri = results.find(uri => uri.fsPath.toLowerCase().endsWith(basename));
-			}
-		}
-
-		if (foundUri) {
-			const doc = await vscode.workspace.openTextDocument(foundUri);
-			await vscode.window.showTextDocument(doc);
-			return;
-		}
-
-		vscode.window.showErrorMessage(`Unable to open YAML file: ${yamlPath}`);
-	}
-
 	async function runSitecoreExplain(path: string): Promise<string> {
 		if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
 			return 'No workspace open to run dotnet sitecore explain.';
@@ -161,7 +113,6 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		disposable,
 		refreshTreeCommand,
-		openYamlCommand,
 		copyPathCommand,
 		showDetailsCommand
 	);

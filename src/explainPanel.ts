@@ -110,7 +110,8 @@ export class ExplainPanel {
 			? `<section>\n\t<h1>Module</h1>\n\t<p><a href="#" id="open-module-json" data-module="${this.escapeHtml(parsed.moduleName)}">${this.escapeHtml(parsed.moduleName)}</a>${parsed.moduleDescription ? ` - ${this.escapeHtml(parsed.moduleDescription)}` : ''}</p>\n</section>`
 			: '';
 
-		const yamlFileName = parsed.yamlPath ? parsed.yamlPath.replace(/.*[\\/]/, '') : undefined;
+
+		const yamlFileName = parsed.yamlPath ? parsed.yamlPath.replace(/.*[\/]/, '') : undefined;
 		const yamlSection = yamlFileName
 			? `<section>\n\t<h1>YAML</h1>\n\t<p><a href=\"#\" id=\"open-yaml\" data-path=\"${this.escapeHtml(parsed.yamlPath!)}\">${this.escapeHtml(yamlFileName)}</a></p>\n</section>`
 			: '';

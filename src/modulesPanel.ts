@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ModuleListingItem } from './tree/contentTreeProvider';
+import { EditModulePanel } from './editModulePanel';
 
 interface ModulesPanelData {
   modules: ModuleListingItem[];
@@ -15,6 +16,9 @@ export class ModulesPanel {
     this.panel.webview.onDidReceiveMessage(async message => {
       if (message.command === 'openModuleJsonPath' && typeof message.jsonFilePath === 'string') {
         await this.openModuleJsonFile(message.jsonFilePath);
+      }
+      if (message.command === 'editModule' && typeof message.jsonFilePath === 'string') {
+        await EditModulePanel.createOrShow(message.jsonFilePath);
       }
     });
   }
@@ -132,6 +136,7 @@ h1 {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
+  cursor: pointer;
 }
 .entry {
   padding: 8px 0;
@@ -196,6 +201,14 @@ h1 {
         }
       });
     });
+    document.querySelectorAll('.edit-button').forEach(btn => {
+      btn.addEventListener('click', event => {
+        const target = event.currentTarget;
+        if (!(target instanceof HTMLElement)) { return; }
+        const jsonFilePath = target.getAttribute('data-json-path');
+        if (jsonFilePath) { vscode.postMessage({ command: 'editModule', jsonFilePath }); }
+      });
+    });
   </script>
 </body>
 </html>`;
@@ -226,7 +239,7 @@ h1 {
         ${descriptionHtml}
         ${entriesHtml}
         <div class="card-footer">
-          <button type="button" class="edit-button">Edit</button>
+          <button type="button" class="edit-button" data-json-path="${this.escapeHtml(module.jsonFilePath)}">Edit</button>
         </div>
       </article>
     `;

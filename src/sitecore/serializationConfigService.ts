@@ -17,6 +17,10 @@ export class SerializationConfigService {
   private static instance: SerializationConfigService;
   private config: any;
 
+  private buildYamlPath(moduleName: string, subtreeKey: string): string {
+    return `${moduleName}/${subtreeKey}`;
+  }
+
   private constructor() {
     this.config = serializationConfig;
   }
@@ -57,7 +61,7 @@ export class SerializationConfigService {
             subtreeScope: subtree.scope,
             subtreePushOperations: subtree.pushOperations,
             subtreeDatabase: subtree.database,
-            yamlPath: `${module.name}/${subtree.key}` // Simplified yml path reference
+            yamlPath: this.buildYamlPath(module.name, subtree.key)
           };
         }
 
@@ -74,7 +78,7 @@ export class SerializationConfigService {
               subtreeScope: subtree.scope,
               subtreePushOperations: subtree.pushOperations,
               subtreeDatabase: subtree.database,
-              yamlPath: ''
+              yamlPath: this.buildYamlPath(module.name, subtree.key)
             };
           }
         }

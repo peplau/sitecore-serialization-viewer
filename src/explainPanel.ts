@@ -58,13 +58,17 @@ export class ExplainPanel {
 		const lines = explainOutput.split(/\r?\n/).filter(line => line.trim().length > 0);
 		const moduleName = item.matchedModule || (lines[0]?.match(/^\[([^\]]+)\]/)?.[1] ?? 'Unknown');
 		let status = 'Not serialized';
+		let isSerialized = false;
 		if (item.status === 'direct') {
 			status = 'Serialized (Directly)';
+			isSerialized = true;
 		} else if (item.status === 'indirect') {
 			status = 'Serialized (Indirectly)';
+			isSerialized = true;
 		}
 		if (lines.some(line => /not included/i.test(line))) {
 			status = 'Not serialized';
+			isSerialized = false;
 		}
 
 		const yamlRegex = /([A-Za-z]:[\\/][^\s"']+\.(?:yml|yaml))/i;
@@ -95,13 +99,14 @@ export class ExplainPanel {
 			moduleDescription: moduleName === 'Unknown' ? undefined : item.moduleDescription,
 			moduleJsonPath: moduleName === 'Unknown' ? undefined : item.moduleJsonPath,
 			status,
+			isSerialized,
 			reasons: reasonLines,
 			yamlPath: yamlPathFromOutput ?? item.yamlPath,
 			directIncludeInfo: includeInfo
 		};
 	}
 
-	private getHtml(item: SitecoreItem, parsed: { moduleName: string; moduleDescription?: string; moduleJsonPath?: string; status: string; reasons: string[]; yamlPath?: string; directIncludeInfo?: { include: string; path?: string; scope?: string; pushOperations?: string; database?: string; moduleJsonPath?: string } }): string {
+	private getHtml(item: SitecoreItem, parsed: { moduleName: string; moduleDescription?: string; moduleJsonPath?: string; status: string; isSerialized: boolean; reasons: string[]; yamlPath?: string; directIncludeInfo?: { include: string; path?: string; scope?: string; pushOperations?: string; database?: string; moduleJsonPath?: string } }): string {
 		const reasonHtml = parsed.reasons.length > 0
 			? parsed.reasons.map(line => `<li>${this.escapeHtml(line)}</li>`).join('')
 			: '<li>No explain output available.</li>';
@@ -112,7 +117,7 @@ export class ExplainPanel {
 
 
 		const yamlFileName = parsed.yamlPath ? parsed.yamlPath.replace(/.*[\/]/, '') : undefined;
-		const yamlSection = yamlFileName
+		const yamlSection = parsed.isSerialized && yamlFileName
 			? `<section>\n\t<h1>YAML</h1>\n\t<p><a href=\"#\" id=\"open-yaml\" data-path=\"${this.escapeHtml(parsed.yamlPath!)}\">${this.escapeHtml(yamlFileName)}</a></p>\n</section>`
 			: '';
 

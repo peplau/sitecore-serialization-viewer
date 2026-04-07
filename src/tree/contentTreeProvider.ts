@@ -12,6 +12,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private client: AuthoringGraphqlClient;
   private cache: Map<string, SitecoreItem[]> = new Map();
   private explainStatusCache: Map<string, SerializationStatus> = new Map();
+  private loadGeneration = 0;
   private readonly exec = promisify(execCallback);
 
   constructor() {
@@ -57,6 +58,8 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   }
 
   async getChildren(element?: SitecoreTreeItem): Promise<SitecoreTreeItem[]> {
+    const requestGeneration = this.loadGeneration;
+
     // If no element, return the root /sitecore node
     if (!element) {
       const rootItem: SitecoreItem = {
@@ -86,6 +89,11 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       items = (result || []).filter((item: SitecoreItem) => item.path !== basePath);
       items = await this.reconcileIndirectStatuses(items);
 
+      // If a hard reset happened while this request was in flight, discard stale results.
+      if (requestGeneration !== this.loadGeneration) {
+        return [];
+      }
+
       if (items.length === 0) {
         console.warn(`No children returned from GraphQL for ${basePath}`);
       }
@@ -102,9 +110,15 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     ));
   }
 
-  refresh(): void {
+  refresh(options?: { resetState?: boolean }): void {
     this.cache.clear();
     this.explainStatusCache.clear();
+
+    if (options?.resetState) {
+      this.loadGeneration += 1;
+      this.client.reset();
+    }
+
     this._onDidChangeTreeData.fire();
   }
 

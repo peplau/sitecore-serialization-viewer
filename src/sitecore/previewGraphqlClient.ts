@@ -33,6 +33,12 @@ export class AuthoringGraphqlClient {
   private headers: Record<string, string> | undefined;
   private language: string = 'en';
 
+  reset(): void {
+    this.endpoint = undefined;
+    this.headers = undefined;
+    this.language = 'en';
+  }
+
   private async ensureInitialized(): Promise<void> {
     if (this.endpoint !== undefined) {
       return;

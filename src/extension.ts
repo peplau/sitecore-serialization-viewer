@@ -20,8 +20,9 @@ export function activate(context: vscode.ExtensionContext) {
 	vscode.window.registerTreeDataProvider('sitecoreContentTree', treeProvider);
 
 	// Register commands
-	const refreshTreeCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.refreshTree', () => {
-		treeProvider.refresh();
+	const refreshTreeCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.refreshTree', async () => {
+		await vscode.commands.executeCommand('workbench.actions.treeView.sitecoreContentTree.collapseAll');
+		treeProvider.refresh({ resetState: true });
 	});
 
 	const copyPathCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.copyPath', (item: SitecoreTreeItem) => {

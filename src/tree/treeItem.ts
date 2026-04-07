@@ -9,10 +9,6 @@ export class SitecoreTreeItem extends vscode.TreeItem {
     super(item.name, collapsibleState);
 
     this.tooltip = `${item.path}\nStatus: ${item.status}`;
-    this.description = item.status === SerializationStatus.Direct ? 'D' :
-                      item.status === SerializationStatus.Indirect ? 'I' :
-                      item.status === SerializationStatus.Untracked ? 'U' : 'N';
-
     // Set icon based on status and serialization content
     this.iconPath = this.getIconPath(item);
 

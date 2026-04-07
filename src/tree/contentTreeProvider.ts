@@ -14,9 +14,22 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private explainStatusCache: Map<string, SerializationStatus> = new Map();
   private loadGeneration = 0;
   private readonly exec = promisify(execCallback);
+  private selectedDatabase: string;
 
   constructor() {
     this.client = new AuthoringGraphqlClient();
+    const config = vscode.workspace.getConfiguration('sitecoreSerializationViewer');
+    this.selectedDatabase = config.get<string>('defaultDatabase') || 'master';
+    this.client.setDatabase(this.selectedDatabase);
+  }
+
+  getSelectedDatabase(): string {
+    return this.selectedDatabase;
+  }
+
+  setSelectedDatabase(database: string): void {
+    this.selectedDatabase = database || 'master';
+    this.client.setDatabase(this.selectedDatabase);
   }
 
   private readonly fallbackMockData: SitecoreItem[] = [
@@ -117,6 +130,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     if (options?.resetState) {
       this.loadGeneration += 1;
       this.client.reset();
+      this.client.setDatabase(this.selectedDatabase);
     }
 
     this._onDidChangeTreeData.fire();

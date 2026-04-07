@@ -57,6 +57,11 @@
       {
         "command": "sitecore-serialization-viewer.showDetails",
         "title": "Show Details"
+      },
+      {
+        "command": "sitecore-serialization-viewer.selectDatabase",
+        "title": "Select Sitecore Database",
+        "icon": "$(database)"
       }
     ],
     "views": {

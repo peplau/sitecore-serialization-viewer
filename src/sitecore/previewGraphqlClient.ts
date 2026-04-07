@@ -32,11 +32,21 @@ export class AuthoringGraphqlClient {
   private endpoint: string | undefined;
   private headers: Record<string, string> | undefined;
   private language: string = 'en';
+  private database: string = 'master';
+
+  setDatabase(database: string): void {
+    this.database = database || 'master';
+  }
+
+  getDatabase(): string {
+    return this.database;
+  }
 
   reset(): void {
     this.endpoint = undefined;
     this.headers = undefined;
     this.language = 'en';
+    this.database = 'master';
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -54,6 +64,7 @@ export class AuthoringGraphqlClient {
     const editingSecret = envVars['SITECORE_EDITING_SECRET'];
     const authToken = await this.loadSitecoreAccessToken();
     this.language = config.get<string>('defaultLanguage') || envVars['LANGUAGE'] || 'en';
+    this.database = this.database || config.get<string>('defaultDatabase') || envVars['SITECORE_DATABASE'] || 'master';
 
     if (explicitUrl && explicitUrl.trim().length > 0) {
       this.endpoint = explicitUrl.trim();
@@ -233,13 +244,17 @@ export class AuthoringGraphqlClient {
 
   async getChildren(path: string): Promise<SitecoreItem[]> {
     const normalizedPath = path || '/sitecore';
+    const selectedDatabase = this.database || 'master';
 
-    const query = `query ItemChildren($path: String = "/sitecore") {\n  item(where: { path: $path }) {\n    itemId\n    name\n    path\n    children {\n      nodes {\n        itemId\n        name\n        path\n        template { name }\n        children {\n          nodes {\n            itemId\n          }\n        }\n      }\n    }\n  }\n}`;
+    const query = `query ItemChildren($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    children {\n      nodes {\n        itemId\n        name\n        path\n        template { name }\n        children {\n          nodes {\n            itemId\n          }\n        }\n      }\n    }\n  }\n}`;
 
-    const data = await this.executeQuery<ItemChildrenResponse>(query, { path: normalizedPath });
+    const data = await this.executeQuery<ItemChildrenResponse>(query, {
+      path: normalizedPath,
+      database: selectedDatabase
+    });
     const children = data.item?.children?.nodes || [];
 
-    console.log(`GraphQL query for ${normalizedPath}: received ${children.length} children`);
+    console.log(`GraphQL query for ${normalizedPath} (${selectedDatabase}): received ${children.length} children`);
 
     const serializationService = SerializationConfigService.getInstance();
     const items = children

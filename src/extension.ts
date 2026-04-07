@@ -19,8 +19,41 @@ export function activate(context: vscode.ExtensionContext) {
 	const treeProvider = new ContentTreeProvider();
 	vscode.window.registerTreeDataProvider('sitecoreContentTree', treeProvider);
 
+	const databaseStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
+	const updateDatabaseStatus = () => {
+		databaseStatus.text = `Sitecore DB: ${treeProvider.getSelectedDatabase()} $(chevron-down)`;
+		databaseStatus.name = 'Sitecore Database Selector';
+		databaseStatus.tooltip = 'Select Sitecore database for content tree (master/core)';
+	};
+	updateDatabaseStatus();
+	databaseStatus.command = 'sitecore-serialization-viewer.selectDatabase';
+	databaseStatus.show();
+
 	// Register commands
 	const refreshTreeCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.refreshTree', async () => {
+		await vscode.commands.executeCommand('workbench.actions.treeView.sitecoreContentTree.collapseAll');
+		treeProvider.refresh({ resetState: true });
+	});
+
+	const selectDatabaseCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.selectDatabase', async () => {
+		const current = treeProvider.getSelectedDatabase();
+		const selection = await vscode.window.showQuickPick(
+			[
+				{ label: 'master', description: current === 'master' ? 'Current' : '' },
+				{ label: 'core', description: current === 'core' ? 'Current' : '' }
+			],
+			{
+				title: 'Select Sitecore Database',
+				placeHolder: 'Choose the Sitecore database for tree loading'
+			}
+		);
+
+		if (!selection || selection.label === current) {
+			return;
+		}
+
+		treeProvider.setSelectedDatabase(selection.label);
+		updateDatabaseStatus();
 		await vscode.commands.executeCommand('workbench.actions.treeView.sitecoreContentTree.collapseAll');
 		treeProvider.refresh({ resetState: true });
 	});
@@ -46,7 +79,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	vscode.window.onDidReceiveMessage?.(async (message) => {
+	(vscode.window as any).onDidReceiveMessage?.(async (message: any) => {
 		if (message.command === 'openIncludeInJson' && message.includeName && message.jsonPath) {
 			const workspaceFolders = vscode.workspace.workspaceFolders;
 			if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -112,8 +145,10 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	context.subscriptions.push(
+		databaseStatus,
 		disposable,
 		refreshTreeCommand,
+		selectDatabaseCommand,
 		copyPathCommand,
 		showDetailsCommand
 	);

@@ -1,19 +1,23 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { SitecoreItem } from './tree/models';
 import { SerializationConfigService } from './sitecore/serializationConfigService';
+import { EditModulePanel } from './editModulePanel';
 
 export class ExplainPanel {
 	public static currentPanel: ExplainPanel | undefined;
 
 	private readonly panel: vscode.WebviewPanel;
 	private readonly extensionUri: vscode.Uri;
+	private readonly onViewItems: (jsonFilePath: string) => Promise<void>;
 
-	private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+	private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, onViewItems: (jsonFilePath: string) => Promise<void>) {
 		this.panel = panel;
 		this.extensionUri = extensionUri;
+		this.onViewItems = onViewItems;
 	}
 
-	public static createOrShow(extensionUri: vscode.Uri): ExplainPanel {
+	public static createOrShow(extensionUri: vscode.Uri, onViewItems: (jsonFilePath: string) => Promise<void>): ExplainPanel {
 		const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : vscode.ViewColumn.One;
 
 		if (ExplainPanel.currentPanel) {
@@ -31,7 +35,7 @@ export class ExplainPanel {
 			}
 		);
 
-		ExplainPanel.currentPanel = new ExplainPanel(panel, extensionUri);
+		ExplainPanel.currentPanel = new ExplainPanel(panel, extensionUri, onViewItems);
 		ExplainPanel.currentPanel.panel.onDidDispose(() => {
 			ExplainPanel.currentPanel = undefined;
 		});
@@ -42,6 +46,22 @@ export class ExplainPanel {
 			}
 			if (message.command === 'openModuleJson' && message.moduleName) {
 				await ExplainPanel.currentPanel?.openModuleJsonFile(message.moduleName);
+			}
+			if (message.command === 'editModuleByPath' && message.jsonFilePath) {
+				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath) {
+					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
+					return;
+				}
+				await EditModulePanel.createOrShow(resolvedPath);
+			}
+			if (message.command === 'viewItemsByPath' && message.jsonFilePath) {
+				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath) {
+					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
+					return;
+				}
+				await ExplainPanel.currentPanel?.onViewItems(resolvedPath);
 			}
 		});
 
@@ -54,9 +74,65 @@ export class ExplainPanel {
 		this.panel.webview.html = this.getHtml(item, parsed);
 	}
 
+	public showLoading(itemPath: string): void {
+		this.panel.title = `Explain: ${itemPath}`;
+		this.panel.webview.html = this.getLoadingHtml(itemPath);
+	}
+
+	private getLoadingHtml(itemPath: string): string {
+		return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body {
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', sans-serif;
+	margin: 16px;
+	color: var(--vscode-editor-foreground);
+}
+.loading-wrap {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 10px 12px;
+	border: 1px solid var(--vscode-editorWidget-border, #454545);
+	border-radius: 8px;
+	background: var(--vscode-editor-background);
+}
+.spinner {
+	width: 16px;
+	height: 16px;
+	border: 2px solid var(--vscode-editorWidget-border, #454545);
+	border-top-color: var(--vscode-textLink-foreground, #3794ff);
+	border-radius: 50%;
+	animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+h1 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+p { margin: 0 0 0.8rem; }
+</style>
+</head>
+<body>
+<h1>Path</h1>
+<p>${this.escapeHtml(itemPath)}</p>
+<div class="loading-wrap">
+	<div class="spinner" aria-hidden="true"></div>
+	<div>Loading explain data...</div>
+</div>
+</body>
+</html>`;
+	}
+
 	private parseExplainOutput(item: SitecoreItem, explainOutput: string) {
 		const lines = explainOutput.split(/\r?\n/).filter(line => line.trim().length > 0);
 		const moduleName = item.matchedModule || (lines[0]?.match(/^\[([^\]]+)\]/)?.[1] ?? 'Unknown');
+		const moduleJsonPath = moduleName === 'Unknown'
+			? undefined
+			: (item.moduleJsonPath || SerializationConfigService.getInstance().resolveModuleJsonPath(moduleName));
 		let status = 'Not serialized';
 		let isSerialized = false;
 		if (item.status === 'direct') {
@@ -90,14 +166,15 @@ export class ExplainPanel {
 				path: item.subtreePath,
 				scope: item.subtreeScope,
 				pushOperations: item.subtreePushOperations,
-				database: item.subtreeDatabase
+				database: item.subtreeDatabase,
+				moduleJsonPath
 			}
 			: undefined;
 
 		return {
 			moduleName,
 			moduleDescription: moduleName === 'Unknown' ? undefined : item.moduleDescription,
-			moduleJsonPath: moduleName === 'Unknown' ? undefined : item.moduleJsonPath,
+			moduleJsonPath,
 			status,
 			isSerialized,
 			reasons: reasonLines,
@@ -112,7 +189,7 @@ export class ExplainPanel {
 			: '<li>No explain output available.</li>';
 
 		const moduleSection = parsed.moduleName !== 'Unknown'
-			? `<section>\n\t<h1>Module</h1>\n\t<p><a href="#" id="open-module-json" data-module="${this.escapeHtml(parsed.moduleName)}">${this.escapeHtml(parsed.moduleName)}</a>${parsed.moduleDescription ? ` - ${this.escapeHtml(parsed.moduleDescription)}` : ''}</p>\n</section>`
+			? `<section>\n\t<h1>Module</h1>\n\t<p><a href="#" id="open-module-json" data-module="${this.escapeHtml(parsed.moduleName)}">${this.escapeHtml(parsed.moduleName)}</a>${parsed.moduleDescription ? ` - ${this.escapeHtml(parsed.moduleDescription)}` : ''}</p>\n\t${parsed.moduleJsonPath ? `<div class="module-actions"><button type="button" id="edit-module" data-json="${this.escapeHtml(parsed.moduleJsonPath)}">Edit</button><button type="button" id="view-module-items" data-json="${this.escapeHtml(parsed.moduleJsonPath)}">View Items</button></div>` : ''}\n</section>`
 			: '';
 
 
@@ -138,6 +215,25 @@ pre { white-space: pre-wrap; word-break: break-word; background: #1e1e1e; color:
 li { margin-bottom: 0.4rem; }
 a { color: #3794ff; text-decoration: none; }
 a:hover { text-decoration: underline; }
+.module-actions { display: flex; gap: 8px; margin-top: 8px; }
+.module-actions button {
+	padding: 6px 12px;
+	border: 1px solid color-mix(in srgb, var(--vscode-editorWidget-border) 65%, #d4b25f 35%);
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--vscode-sideBar-background) 78%, black 22%);
+	color: var(--vscode-button-foreground);
+	font: inherit;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	cursor: pointer;
+}
+.module-actions button#view-module-items {
+	background: color-mix(in srgb, var(--vscode-sideBar-background) 86%, white 14%);
+}
+.module-actions button:hover {
+	opacity: 0.9;
+}
 </style>
 </head>
 <body>
@@ -181,6 +277,34 @@ ${yamlSection}
 				const moduleName = target.getAttribute('data-module');
 				if (moduleName) {
 					vscode.postMessage({ command: 'openModuleJson', moduleName });
+				}
+			}
+		});
+	}
+
+	const editModuleButton = document.getElementById('edit-module');
+	if (editModuleButton) {
+		editModuleButton.addEventListener('click', event => {
+			event.preventDefault();
+			const target = event.currentTarget;
+			if (target instanceof HTMLElement) {
+				const jsonFilePath = target.getAttribute('data-json');
+				if (jsonFilePath) {
+					vscode.postMessage({ command: 'editModuleByPath', jsonFilePath });
+				}
+			}
+		});
+	}
+
+	const viewItemsButton = document.getElementById('view-module-items');
+	if (viewItemsButton) {
+		viewItemsButton.addEventListener('click', event => {
+			event.preventDefault();
+			const target = event.currentTarget;
+			if (target instanceof HTMLElement) {
+				const jsonFilePath = target.getAttribute('data-json');
+				if (jsonFilePath) {
+					vscode.postMessage({ command: 'viewItemsByPath', jsonFilePath });
 				}
 			}
 		});
@@ -243,6 +367,37 @@ ${yamlSection}
 		}
 
 		vscode.window.showErrorMessage(`Unable to open YAML file: ${yamlPath}`);
+	}
+
+	private async resolveModuleJsonPath(inputPath: string): Promise<string | undefined> {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (!workspaceFolders || workspaceFolders.length === 0) {
+			return undefined;
+		}
+
+		const rootFolder = workspaceFolders[0].uri.fsPath;
+		const candidates = path.isAbsolute(inputPath)
+			? [inputPath]
+			: [inputPath, path.join(rootFolder, inputPath)];
+
+		for (const candidate of candidates) {
+			try {
+				const uri = vscode.Uri.file(candidate);
+				await vscode.workspace.openTextDocument(uri);
+				return uri.fsPath;
+			} catch {
+				// Continue trying candidates.
+			}
+		}
+
+		const normalizedInput = inputPath.replace(/\\/g, '/').toLowerCase();
+		const jsonUris = await vscode.workspace.findFiles('**/*.json', '**/node_modules/**', 500);
+		const matched = jsonUris.find(uri => {
+			const normalized = uri.fsPath.replace(/\\/g, '/').toLowerCase();
+			return normalized.endsWith(normalizedInput);
+		});
+
+		return matched?.fsPath;
 	}
 
 	private async openModuleJsonFile(moduleName: string): Promise<void> {

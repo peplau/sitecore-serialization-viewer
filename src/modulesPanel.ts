@@ -10,9 +10,11 @@ export class ModulesPanel {
   public static currentPanel: ModulesPanel | undefined;
 
   private readonly panel: vscode.WebviewPanel;
+  private readonly onViewItems: (jsonFilePath: string) => Promise<void>;
 
-  private constructor(panel: vscode.WebviewPanel) {
+  private constructor(panel: vscode.WebviewPanel, onViewItems: (jsonFilePath: string) => Promise<void>) {
     this.panel = panel;
+    this.onViewItems = onViewItems;
     this.panel.webview.onDidReceiveMessage(async message => {
       if (message.command === 'openModuleJsonPath' && typeof message.jsonFilePath === 'string') {
         await this.openModuleJsonFile(message.jsonFilePath);
@@ -20,10 +22,13 @@ export class ModulesPanel {
       if (message.command === 'editModule' && typeof message.jsonFilePath === 'string') {
         await EditModulePanel.createOrShow(message.jsonFilePath);
       }
+      if (message.command === 'viewItems' && typeof message.jsonFilePath === 'string') {
+        await this.onViewItems(message.jsonFilePath);
+      }
     });
   }
 
-  public static createOrShow(): ModulesPanel {
+  public static createOrShow(onViewItems: (jsonFilePath: string) => Promise<void>): ModulesPanel {
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : vscode.ViewColumn.One;
 
     if (ModulesPanel.currentPanel) {
@@ -40,7 +45,7 @@ export class ModulesPanel {
       }
     );
 
-    ModulesPanel.currentPanel = new ModulesPanel(panel);
+    ModulesPanel.currentPanel = new ModulesPanel(panel, onViewItems);
     ModulesPanel.currentPanel.panel.onDidDispose(() => {
       ModulesPanel.currentPanel = undefined;
     });
@@ -126,11 +131,28 @@ h1 {
   padding-top: 12px;
   border-top: 1px solid color-mix(in srgb, var(--card-border) 65%, transparent);
 }
+.card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
 .edit-button {
   padding: 6px 12px;
   border: 1px solid var(--card-border);
   border-radius: 999px;
   background: color-mix(in srgb, var(--card-bg) 78%, black 22%);
+  color: var(--vscode-button-foreground);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.view-items-button {
+  padding: 6px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--card-bg) 86%, white 14%);
   color: var(--vscode-button-foreground);
   font: inherit;
   font-size: 12px;
@@ -209,6 +231,14 @@ h1 {
         if (jsonFilePath) { vscode.postMessage({ command: 'editModule', jsonFilePath }); }
       });
     });
+    document.querySelectorAll('.view-items-button').forEach(btn => {
+      btn.addEventListener('click', event => {
+        const target = event.currentTarget;
+        if (!(target instanceof HTMLElement)) { return; }
+        const jsonFilePath = target.getAttribute('data-json-path');
+        if (jsonFilePath) { vscode.postMessage({ command: 'viewItems', jsonFilePath }); }
+      });
+    });
   </script>
 </body>
 </html>`;
@@ -239,7 +269,10 @@ h1 {
         ${descriptionHtml}
         ${entriesHtml}
         <div class="card-footer">
-          <button type="button" class="edit-button" data-json-path="${this.escapeHtml(module.jsonFilePath)}">Edit</button>
+          <div class="card-actions">
+            <button type="button" class="edit-button" data-json-path="${this.escapeHtml(module.jsonFilePath)}">Edit</button>
+            <button type="button" class="view-items-button" data-json-path="${this.escapeHtml(module.jsonFilePath)}">View Items</button>
+          </div>
         </div>
       </article>
     `;

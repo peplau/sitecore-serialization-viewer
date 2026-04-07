@@ -37,6 +37,8 @@ interface ModuleSerializationPathConfig {
   scope?: string;
   database?: string;
   allowedPushOperations?: string;
+  sourceType?: 'include' | 'rule';
+  includeName?: string;
 }
 
 interface ModulePathMatch {
@@ -108,6 +110,95 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         jsonFilePath: source.jsonUri.fsPath
       }))
       .sort((a, b) => a.namespace.localeCompare(b.namespace));
+  }
+
+  async getModuleItemsListingByJsonPath(jsonFilePath: string): Promise<{
+    moduleName: string;
+    description?: string;
+    items: Array<{
+      itemPath: string;
+      status: 'Serialized directly' | 'Serialized indirectly';
+      includeOrRule: string;
+      yamlPath: string;
+      itemId?: string;
+    }>;
+  } | undefined> {
+    const sources = await this.loadModuleSerializationSources();
+    const workspaceRoot = this.getWorkspaceRootPath();
+    const candidatePaths = path.isAbsolute(jsonFilePath)
+      ? [jsonFilePath]
+      : workspaceRoot ? [jsonFilePath, path.join(workspaceRoot, jsonFilePath)] : [jsonFilePath];
+
+    const normalizedCandidates = candidatePaths.map(p => p.replace(/\\/g, '/').toLowerCase());
+    const normalizedInput = jsonFilePath.replace(/\\/g, '/').toLowerCase();
+
+    const source = sources.find(s => {
+      const normalizedSource = s.jsonUri.fsPath.replace(/\\/g, '/').toLowerCase();
+      return normalizedCandidates.includes(normalizedSource) || normalizedSource.endsWith(normalizedInput);
+    });
+    if (!source) {
+      return undefined;
+    }
+
+    const yamlPattern = new vscode.RelativePattern(source.rootUri, 'items/**/*.{yml,yaml}');
+    const yamlUris = await vscode.workspace.findFiles(yamlPattern);
+
+    const rowsByPath = new Map<string, {
+      itemPath: string;
+      status: 'Serialized directly' | 'Serialized indirectly';
+      includeOrRule: string;
+      yamlPath: string;
+      itemId?: string;
+    }>();
+
+    for (const yamlUri of yamlUris) {
+      let content = '';
+      try {
+        const bytes = await vscode.workspace.fs.readFile(yamlUri);
+        content = Buffer.from(bytes).toString('utf8');
+      } catch {
+        continue;
+      }
+
+      const parsed = this.parseYamlMetadata(content);
+      if (!parsed.path) {
+        continue;
+      }
+
+      const match = this.getModulePathMatch(parsed.path, source.pathConfigs);
+      if (!match) {
+        continue;
+      }
+
+      const normalizedPath = this.normalizePath(parsed.path);
+      const current = rowsByPath.get(normalizedPath);
+      const nextStatus: 'Serialized directly' | 'Serialized indirectly' =
+        match.status === SerializationStatus.Direct ? 'Serialized directly' : 'Serialized indirectly';
+      const nextRow = {
+        itemPath: normalizedPath,
+        status: nextStatus,
+        includeOrRule: this.getIncludeOrRuleLabel(match.config),
+        yamlPath: yamlUri.fsPath,
+        itemId: parsed.id
+      };
+
+      if (!current) {
+        rowsByPath.set(normalizedPath, nextRow);
+        continue;
+      }
+
+      if (current.status === 'Serialized indirectly' && nextRow.status === 'Serialized directly') {
+        rowsByPath.set(normalizedPath, nextRow);
+      }
+    }
+
+    const items = Array.from(rowsByPath.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
+
+    return {
+      moduleName: source.moduleName,
+      description: source.description,
+      items
+    };
   }
 
   private isModuleFilterActive(): boolean {
@@ -319,12 +410,18 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return normalized.substring(idx + 1);
   }
 
-  private parseYamlPathAndName(content: string): { path?: string; name?: string } {
+  private parseYamlMetadata(content: string): { path?: string; name?: string; id?: string } {
     const lines = content.split(/\r?\n/);
     let parsedPath: string | undefined;
     let parsedName: string | undefined;
+    let parsedId: string | undefined;
 
     for (let i = 0; i < lines.length; i++) {
+      const idMatch = lines[i].match(/^ID:\s*(.+)\s*$/);
+      if (idMatch) {
+        parsedId = idMatch[1].trim();
+      }
+
       const pathMatch = lines[i].match(/^Path:\s*(.+)\s*$/);
       if (pathMatch) {
         parsedPath = this.normalizePath(pathMatch[1]);
@@ -354,7 +451,15 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       }
     }
 
-    return { path: parsedPath, name: parsedName };
+    return { path: parsedPath, name: parsedName, id: parsedId };
+  }
+
+  private getIncludeOrRuleLabel(config: ModuleSerializationPathConfig): string {
+    if (config.sourceType === 'rule') {
+      return config.includeName ? `${config.includeName} (Rule)` : 'Rule';
+    }
+
+    return config.includeName || config.name || 'Include';
   }
 
   private getWorkspaceRootPath(): string | undefined {
@@ -433,7 +538,12 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return this.normalizePath(`${normalizedParent}/${relativePath}`);
   }
 
-  private flattenPathConfigs(nodes: ModuleSerializationInclude[], parentPath?: string): ModuleSerializationPathConfig[] {
+  private flattenPathConfigs(
+    nodes: ModuleSerializationInclude[],
+    parentPath?: string,
+    sourceType: 'include' | 'rule' = 'include',
+    includeName?: string
+  ): ModuleSerializationPathConfig[] {
     const flattened: ModuleSerializationPathConfig[] = [];
 
     for (const node of nodes) {
@@ -442,18 +552,24 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         continue;
       }
 
+      const effectiveIncludeName = sourceType === 'include'
+        ? (node.name?.trim() || includeName)
+        : includeName;
+
       const config: ModuleSerializationPathConfig = {
         name: node.name,
         path: resolvedPath,
         scope: node.scope,
         database: node.database,
-        allowedPushOperations: node.allowedPushOperations
+        allowedPushOperations: node.allowedPushOperations,
+        sourceType,
+        includeName: effectiveIncludeName
       };
 
       flattened.push(config);
 
       if (Array.isArray(node.rules) && node.rules.length > 0) {
-        flattened.push(...this.flattenPathConfigs(node.rules, resolvedPath));
+        flattened.push(...this.flattenPathConfigs(node.rules, resolvedPath, 'rule', effectiveIncludeName));
       }
     }
 
@@ -640,7 +756,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
           continue;
         }
 
-        const parsed = this.parseYamlPathAndName(content);
+        const parsed = this.parseYamlMetadata(content);
         if (!parsed.path || affectedByPath.has(parsed.path)) {
           continue;
         }

@@ -7,6 +7,7 @@ import { SitecoreItem } from './tree/models';
 import { SitecoreTreeItem } from './tree/treeItem';
 import { ExplainPanel } from './explainPanel';
 import { ModulesPanel } from './modulesPanel';
+import { ModuleItemsPanel } from './moduleItemsPanel';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -234,13 +235,36 @@ export function activate(context: vscode.ExtensionContext) {
 	const exec = promisify(execCallback);
 
 	const showDetailsCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.showDetails', async (item: SitecoreItem) => {
-		const panel = ExplainPanel.createOrShow(context.extensionUri);
+		const panel = ExplainPanel.createOrShow(context.extensionUri, async (jsonFilePath: string) => {
+			const itemsPanel = ModuleItemsPanel.createOrShowLoading(jsonFilePath);
+			const moduleItems = await treeProvider.getModuleItemsListingByJsonPath(jsonFilePath);
+			if (!moduleItems) {
+				const message = `Unable to build module items list for: ${jsonFilePath}`;
+				itemsPanel.showError(message);
+				vscode.window.showErrorMessage(message);
+				return;
+			}
+
+			itemsPanel.update(moduleItems);
+		});
+		panel.showLoading(item.path);
 		const explainResult = await runSitecoreExplain(item.path);
 		panel.update(item, explainResult);
 	});
 
 	const showAllModulesCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.showAllModules', async () => {
-		const panel = ModulesPanel.createOrShow();
+		const panel = ModulesPanel.createOrShow(async (jsonFilePath: string) => {
+			const itemsPanel = ModuleItemsPanel.createOrShowLoading(jsonFilePath);
+			const moduleItems = await treeProvider.getModuleItemsListingByJsonPath(jsonFilePath);
+			if (!moduleItems) {
+				const message = `Unable to build module items list for: ${jsonFilePath}`;
+				itemsPanel.showError(message);
+				vscode.window.showErrorMessage(message);
+				return;
+			}
+
+			itemsPanel.update(moduleItems);
+		});
 		const modules = await treeProvider.getModuleListingItems();
 		panel.update(modules);
 	});

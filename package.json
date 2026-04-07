@@ -72,6 +72,11 @@
         "command": "sitecore-serialization-viewer.selectModule",
         "title": "Select Module",
         "icon": "$(list-selection)"
+      },
+      {
+        "command": "sitecore-serialization-viewer.showAllModules",
+        "title": "Show all modules",
+        "icon": "$(library)"
       }
     ],
     "views": {
@@ -93,6 +98,11 @@
         },
         {
           "command": "sitecore-serialization-viewer.searchPath",
+          "when": "view == sitecoreContentTree",
+          "group": "navigation"
+        },
+        {
+          "command": "sitecore-serialization-viewer.showAllModules",
           "when": "view == sitecoreContentTree",
           "group": "navigation"
         }

@@ -6,6 +6,7 @@ import { ContentTreeProvider } from './tree/contentTreeProvider';
 import { SitecoreItem } from './tree/models';
 import { SitecoreTreeItem } from './tree/treeItem';
 import { ExplainPanel } from './explainPanel';
+import { ModulesPanel } from './modulesPanel';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -238,6 +239,12 @@ export function activate(context: vscode.ExtensionContext) {
 		panel.update(item, explainResult);
 	});
 
+	const showAllModulesCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.showAllModules', async () => {
+		const panel = ModulesPanel.createOrShow();
+		const modules = await treeProvider.getModuleListingItems();
+		panel.update(modules);
+	});
+
 	vscode.window.registerWebviewPanelSerializer('sitecoreSerializationExplain', {
 		deserializeWebviewPanel: async (panel, state) => {
 			// No-op for now
@@ -318,7 +325,8 @@ export function activate(context: vscode.ExtensionContext) {
 		selectDatabaseCommand,
 		selectModuleCommand,
 		copyPathCommand,
-		showDetailsCommand
+		showDetailsCommand,
+		showAllModulesCommand
 	);
 }
 

@@ -25,6 +25,12 @@ interface ModuleSerializationSource {
   pathConfigs: ModuleSerializationPathConfig[];
 }
 
+export interface ModuleListingItem {
+  namespace: string;
+  description?: string;
+  jsonFilePath: string;
+}
+
 interface ModuleSerializationPathConfig {
   name?: string;
   path: string;
@@ -91,6 +97,17 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     }
 
     return this.serializationConfigService.getModuleNames().sort((a, b) => a.localeCompare(b));
+  }
+
+  async getModuleListingItems(): Promise<ModuleListingItem[]> {
+    const sources = await this.loadModuleSerializationSources();
+    return sources
+      .map(source => ({
+        namespace: source.moduleName,
+        description: source.description,
+        jsonFilePath: source.jsonUri.fsPath
+      }))
+      .sort((a, b) => a.namespace.localeCompare(b.namespace));
   }
 
   private isModuleFilterActive(): boolean {

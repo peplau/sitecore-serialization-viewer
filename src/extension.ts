@@ -17,7 +17,90 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Create and register the tree data provider
 	const treeProvider = new ContentTreeProvider();
-	vscode.window.registerTreeDataProvider('sitecoreContentTree', treeProvider);
+	const treeView = vscode.window.createTreeView('sitecoreContentTree', {
+		treeDataProvider: treeProvider,
+		showCollapseAll: true
+	});
+
+	const revealPathInTree = async (pathValue: string) => {
+		const trimmedPath = (pathValue || '').trim();
+		if (!trimmedPath) {
+			return;
+		}
+
+		if (!trimmedPath.startsWith('/')) {
+			vscode.window.showWarningMessage('Path searches must start with /sitecore. ID search is not enabled yet.');
+			return;
+		}
+
+		const normalizedPath = trimmedPath.length > 1 ? trimmedPath.replace(/\/+$/, '') : trimmedPath;
+		if (!normalizedPath.toLowerCase().startsWith('/sitecore')) {
+			vscode.window.showWarningMessage('Path searches must start with /sitecore. ID search is not enabled yet.');
+			return;
+		}
+
+		const segments = normalizedPath.split('/').filter(Boolean);
+		if (segments.length === 0 || segments[0].toLowerCase() !== 'sitecore') {
+			vscode.window.showWarningMessage(`Item not found in tree for path: ${trimmedPath}`);
+			return;
+		}
+
+		const matchedItem = await treeProvider.getItemByPath(normalizedPath);
+		if (!matchedItem) {
+			vscode.window.showWarningMessage(`Item not found in tree for path: ${trimmedPath}`);
+			return;
+		}
+
+		await vscode.commands.executeCommand('sitecore-serialization-viewer.showDetails', matchedItem);
+
+		const roots = await treeProvider.getChildren();
+		const root = roots[0];
+		if (!root) {
+			vscode.window.showWarningMessage('Unable to load Sitecore root node.');
+			return;
+		}
+
+		if (segments.length === 1) {
+			await treeView.reveal(root, { expand: true, focus: true, select: true });
+			return;
+		}
+
+		let current = root;
+		let currentPath = '/sitecore';
+
+		for (let i = 1; i < segments.length; i++) {
+			// Expand first so users can see each level opening and loading naturally.
+			await treeView.reveal(current, { expand: true, focus: false, select: false });
+
+			const children = await treeProvider.getChildren(current);
+			currentPath = `${currentPath}/${segments[i]}`;
+			const next = children.find(child => child.item.path.toLowerCase() === currentPath.toLowerCase());
+			if (!next) {
+				vscode.window.showWarningMessage(`Item not found in tree for path: ${trimmedPath}`);
+				return;
+			}
+
+			current = next;
+		}
+
+		await treeView.reveal(current, { expand: false, focus: true, select: true });
+	};
+
+	const searchPathCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.searchPath', async () => {
+		const value = await vscode.window.showInputBox({
+			prompt: 'Type the item path or ID',
+			placeHolder: '/sitecore/content/home',
+			ignoreFocusOut: true
+		});
+
+		if (!value) {
+			return;
+		}
+
+		await revealPathInTree(value);
+	});
+
+	context.subscriptions.push(treeView);
 
 	const databaseStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
 	const updateDatabaseStatus = () => {
@@ -148,6 +231,7 @@ export function activate(context: vscode.ExtensionContext) {
 		databaseStatus,
 		disposable,
 		refreshTreeCommand,
+		searchPathCommand,
 		selectDatabaseCommand,
 		copyPathCommand,
 		showDetailsCommand

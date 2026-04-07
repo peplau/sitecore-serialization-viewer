@@ -28,6 +28,10 @@ interface ItemChildrenResponse {
   };
 }
 
+interface ItemByPathResponse {
+  item?: ItemResult;
+}
+
 export class AuthoringGraphqlClient {
   private endpoint: string | undefined;
   private headers: Record<string, string> | undefined;
@@ -242,6 +246,46 @@ export class AuthoringGraphqlClient {
     return payload.data;
   }
 
+  private mapItemResult(item: ItemResult): SitecoreItem {
+    const serializationService = SerializationConfigService.getInstance();
+    const serializationMatch = serializationService.checkSerializationStatus(item.path);
+
+    return {
+      id: item.itemId,
+      name: item.name,
+      path: item.path,
+      templateId: undefined,
+      templateName: item.template?.name,
+      sortOrder: undefined,
+      displayName: undefined,
+      hasChildren: (item.children?.nodes?.length ?? 0) > 0,
+      status: serializationMatch?.status ?? SerializationStatus.Untracked,
+      yamlPath: serializationMatch?.yamlPath,
+      matchedModule: serializationMatch?.moduleName,
+      moduleDescription: serializationMatch?.moduleDescription,
+      moduleJsonPath: serializationMatch ? serializationService.resolveModuleJsonPath(serializationMatch.moduleName) : undefined,
+      subtreeKey: serializationMatch?.subtreeKey,
+      subtreePath: serializationMatch?.subtreePath,
+      subtreeScope: serializationMatch?.subtreeScope,
+      subtreePushOperations: serializationMatch?.subtreePushOperations,
+      subtreeDatabase: serializationMatch?.subtreeDatabase
+    };
+  }
+
+  async getItemByPath(path: string): Promise<SitecoreItem | undefined> {
+    const normalizedPath = path || '/sitecore';
+    const selectedDatabase = this.database || 'master';
+
+    const query = `query ItemByPath($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    template { name }\n    children {\n      nodes {\n        itemId\n      }\n    }\n  }\n}`;
+
+    const data = await this.executeQuery<ItemByPathResponse>(query, {
+      path: normalizedPath,
+      database: selectedDatabase
+    });
+
+    return data.item ? this.mapItemResult(data.item) : undefined;
+  }
+
   async getChildren(path: string): Promise<SitecoreItem[]> {
     const normalizedPath = path || '/sitecore';
     const selectedDatabase = this.database || 'master';
@@ -256,34 +300,9 @@ export class AuthoringGraphqlClient {
 
     console.log(`GraphQL query for ${normalizedPath} (${selectedDatabase}): received ${children.length} children`);
 
-    const serializationService = SerializationConfigService.getInstance();
     const items = children
       .filter(child => child.path !== normalizedPath) // Prevent self-reference
-      .map(child => {
-        // Check if item is part of serialization
-        const serializationMatch = serializationService.checkSerializationStatus(child.path);
-
-        return {
-          id: child.itemId,
-          name: child.name,
-          path: child.path,
-          templateId: undefined,
-          templateName: child.template?.name,
-          sortOrder: undefined,
-          displayName: undefined,
-          hasChildren: (child.children?.nodes?.length ?? 0) > 0,
-          status: serializationMatch?.status ?? SerializationStatus.Untracked,
-          yamlPath: serializationMatch?.yamlPath,
-          matchedModule: serializationMatch?.moduleName,
-          moduleDescription: serializationMatch?.moduleDescription,
-          moduleJsonPath: serializationMatch ? serializationService.resolveModuleJsonPath(serializationMatch.moduleName) : undefined,
-          subtreeKey: serializationMatch?.subtreeKey,
-          subtreePath: serializationMatch?.subtreePath,
-          subtreeScope: serializationMatch?.subtreeScope,
-          subtreePushOperations: serializationMatch?.subtreePushOperations,
-          subtreeDatabase: serializationMatch?.subtreeDatabase
-        };
-      });
+      .map(child => this.mapItemResult(child));
 
     // Sort by sortOrder (ascending), but handle -1 (unsorted) and other values
     // Then by name as tiebreaker

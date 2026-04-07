@@ -62,6 +62,11 @@
         "command": "sitecore-serialization-viewer.selectDatabase",
         "title": "Select Sitecore Database",
         "icon": "$(database)"
+      },
+      {
+        "command": "sitecore-serialization-viewer.searchPath",
+        "title": "Search Sitecore Path",
+        "icon": "$(search)"
       }
     ],
     "views": {
@@ -78,6 +83,11 @@
       "view/title": [
         {
           "command": "sitecore-serialization-viewer.refreshTree",
+          "when": "view == sitecoreContentTree",
+          "group": "navigation"
+        },
+        {
+          "command": "sitecore-serialization-viewer.searchPath",
           "when": "view == sitecoreContentTree",
           "group": "navigation"
         }

@@ -11,6 +11,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
   private client: AuthoringGraphqlClient;
   private cache: Map<string, SitecoreItem[]> = new Map();
+  private parentPathByPath: Map<string, string> = new Map();
   private explainStatusCache: Map<string, SerializationStatus> = new Map();
   private loadGeneration = 0;
   private readonly exec = promisify(execCallback);
@@ -30,6 +31,22 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   setSelectedDatabase(database: string): void {
     this.selectedDatabase = database || 'master';
     this.client.setDatabase(this.selectedDatabase);
+  }
+
+  async getItemByPath(pathValue: string): Promise<SitecoreItem | undefined> {
+    const normalizedPath = this.normalizePath(pathValue);
+
+    if (normalizedPath === '/sitecore') {
+      return {
+        id: 'sitecore-root',
+        name: 'sitecore',
+        path: '/sitecore',
+        hasChildren: true,
+        status: SerializationStatus.NotSerialized
+      };
+    }
+
+    return this.client.getItemByPath(normalizedPath);
   }
 
   private readonly fallbackMockData: SitecoreItem[] = [
@@ -70,6 +87,96 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return element;
   }
 
+  getParent(element: SitecoreTreeItem): vscode.ProviderResult<SitecoreTreeItem> {
+    const parentPath = this.parentPathByPath.get(element.item.path);
+    if (!parentPath) {
+      return undefined;
+    }
+
+    if (parentPath === '/sitecore') {
+      const rootItem: SitecoreItem = {
+        id: 'sitecore-root',
+        name: 'sitecore',
+        path: '/sitecore',
+        hasChildren: true,
+        status: SerializationStatus.NotSerialized
+      };
+      return this.createTreeItem(rootItem);
+    }
+
+    const parent = this.findCachedItemByPath(parentPath);
+    return parent ? this.createTreeItem(parent) : undefined;
+  }
+
+  private findCachedItemByPath(pathValue: string): SitecoreItem | undefined {
+    for (const items of this.cache.values()) {
+      const found = items.find(item => item.path.toLowerCase() === pathValue.toLowerCase());
+      if (found) {
+        return found;
+      }
+    }
+
+    return undefined;
+  }
+
+  private createTreeItem(item: SitecoreItem): SitecoreTreeItem {
+    return new SitecoreTreeItem(
+      item,
+      item.hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+    );
+  }
+
+  private normalizePath(pathValue: string): string {
+    const trimmed = (pathValue || '').trim();
+    if (!trimmed) {
+      return '/sitecore';
+    }
+
+    const leadingSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+    const withoutTrailingSlash = leadingSlash.length > 1 ? leadingSlash.replace(/\/+$/, '') : leadingSlash;
+    return withoutTrailingSlash || '/sitecore';
+  }
+
+  async findPathChain(pathValue: string): Promise<SitecoreTreeItem[] | undefined> {
+    const normalizedTargetPath = this.normalizePath(pathValue);
+    if (!normalizedTargetPath.toLowerCase().startsWith('/sitecore')) {
+      return undefined;
+    }
+
+    const rootItems = await this.getChildren();
+    const root = rootItems[0];
+    if (!root) {
+      return undefined;
+    }
+
+    if (normalizedTargetPath.toLowerCase() === '/sitecore') {
+      return [root];
+    }
+
+    const segments = normalizedTargetPath.split('/').filter(Boolean);
+    if (segments.length === 0 || segments[0].toLowerCase() !== 'sitecore') {
+      return undefined;
+    }
+
+    const chain: SitecoreTreeItem[] = [root];
+    let current = root;
+    let currentPath = '/sitecore';
+
+    for (let i = 1; i < segments.length; i++) {
+      currentPath = `${currentPath}/${segments[i]}`;
+      const children = await this.getChildren(current);
+      const next = children.find(child => child.item.path.toLowerCase() === currentPath.toLowerCase());
+      if (!next) {
+        return undefined;
+      }
+
+      chain.push(next);
+      current = next;
+    }
+
+    return chain;
+  }
+
   async getChildren(element?: SitecoreTreeItem): Promise<SitecoreTreeItem[]> {
     const requestGeneration = this.loadGeneration;
 
@@ -82,6 +189,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         hasChildren: true,
         status: SerializationStatus.NotSerialized
       };
+      this.parentPathByPath.delete('/sitecore');
       return [new SitecoreTreeItem(rootItem, vscode.TreeItemCollapsibleState.Collapsed)];
     }
 
@@ -89,10 +197,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
     if (this.cache.has(basePath)) {
       const cachedItems = this.cache.get(basePath) || [];
-      return cachedItems.map(item => new SitecoreTreeItem(
-        item,
-        item.hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
-      ));
+      return cachedItems.map(item => this.createTreeItem(item));
     }
 
     let items: SitecoreItem[] = [];
@@ -116,15 +221,16 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     }
 
     this.cache.set(basePath, items);
+    for (const item of items) {
+      this.parentPathByPath.set(item.path, basePath);
+    }
 
-    return items.map(item => new SitecoreTreeItem(
-      item,
-      item.hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
-    ));
+    return items.map(item => this.createTreeItem(item));
   }
 
   refresh(options?: { resetState?: boolean }): void {
     this.cache.clear();
+    this.parentPathByPath.clear();
     this.explainStatusCache.clear();
 
     if (options?.resetState) {

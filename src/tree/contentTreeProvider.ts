@@ -1,9 +1,42 @@
 import * as vscode from 'vscode';
 import { exec as execCallback } from 'child_process';
+import * as path from 'path';
 import { promisify } from 'util';
 import { SitecoreTreeItem } from './treeItem';
 import { SitecoreItem, SerializationStatus } from './models';
 import { AuthoringGraphqlClient } from '../sitecore/previewGraphqlClient';
+import { SerializationConfigService } from '../sitecore/serializationConfigService';
+
+interface ModuleSerializationInclude {
+  name?: string;
+  path?: string;
+  scope?: string;
+  database?: string;
+  allowedPushOperations?: string;
+  rules?: ModuleSerializationInclude[];
+}
+
+interface ModuleSerializationSource {
+  moduleName: string;
+  description?: string;
+  jsonUri: vscode.Uri;
+  rootUri: vscode.Uri;
+  includes: ModuleSerializationInclude[];
+  pathConfigs: ModuleSerializationPathConfig[];
+}
+
+interface ModuleSerializationPathConfig {
+  name?: string;
+  path: string;
+  scope?: string;
+  database?: string;
+  allowedPushOperations?: string;
+}
+
+interface ModulePathMatch {
+  config: ModuleSerializationPathConfig;
+  status: SerializationStatus;
+}
 
 export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<SitecoreTreeItem | undefined | void> = new vscode.EventEmitter<SitecoreTreeItem | undefined | void>();
@@ -11,11 +44,20 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
   private client: AuthoringGraphqlClient;
   private cache: Map<string, SitecoreItem[]> = new Map();
+  private moduleRootItemsByPath: Map<string, SitecoreItem> = new Map();
   private parentPathByPath: Map<string, string> = new Map();
   private explainStatusCache: Map<string, SerializationStatus> = new Map();
   private loadGeneration = 0;
   private readonly exec = promisify(execCallback);
   private selectedDatabase: string;
+  private selectedModule: string = 'All modules';
+  private readonly serializationConfigService = SerializationConfigService.getInstance();
+  private moduleYamlRoots: SitecoreItem[] = [];
+  private moduleYamlChildrenByPath: Map<string, SitecoreItem[]> = new Map();
+  private moduleYamlItemsByPath: Map<string, SitecoreItem> = new Map();
+  private moduleYamlLoadedFor: string | undefined;
+  private availableModulesCache: string[] | undefined;
+  private moduleSerializationSourceCache: Map<string, ModuleSerializationSource | null> = new Map();
 
   constructor() {
     this.client = new AuthoringGraphqlClient();
@@ -31,6 +73,52 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   setSelectedDatabase(database: string): void {
     this.selectedDatabase = database || 'master';
     this.client.setDatabase(this.selectedDatabase);
+  }
+
+  getSelectedModule(): string {
+    return this.selectedModule;
+  }
+
+  setSelectedModule(moduleName: string): void {
+    this.selectedModule = moduleName || 'All modules';
+    this.moduleYamlLoadedFor = undefined;
+  }
+
+  async getAvailableModules(): Promise<string[]> {
+    const configuredModules = await this.getConfiguredModules();
+    if (configuredModules.length > 0) {
+      return configuredModules.sort((a, b) => a.localeCompare(b));
+    }
+
+    return this.serializationConfigService.getModuleNames().sort((a, b) => a.localeCompare(b));
+  }
+
+  private isModuleFilterActive(): boolean {
+    return this.selectedModule !== 'All modules';
+  }
+
+  private isCurrentlySerialized(item: SitecoreItem): boolean {
+    return item.status === SerializationStatus.Direct || item.status === SerializationStatus.Indirect;
+  }
+
+  private isAffectedBySelectedModule(itemPath: string): boolean {
+    if (!this.isModuleFilterActive()) {
+      return true;
+    }
+
+    return !!this.serializationConfigService.checkSerializationStatusForModule(
+      itemPath,
+      this.selectedModule,
+      this.selectedDatabase
+    );
+  }
+
+  private shouldDisplayForSelectedModule(item: SitecoreItem): boolean {
+    if (!this.isModuleFilterActive()) {
+      return true;
+    }
+
+    return this.isAffectedBySelectedModule(item.path) && this.isCurrentlySerialized(item);
   }
 
   async getItemByPath(pathValue: string): Promise<SitecoreItem | undefined> {
@@ -108,11 +196,26 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       return this.createTreeItem(rootItem);
     }
 
+    const moduleRootParent = this.moduleRootItemsByPath.get(parentPath);
+    if (moduleRootParent) {
+      return this.createModuleRootDisplayItem(moduleRootParent);
+    }
+
     const parent = this.findCachedItemByPath(parentPath);
     return parent ? this.createTreeItem(parent) : undefined;
   }
 
   private findCachedItemByPath(pathValue: string): SitecoreItem | undefined {
+    const moduleRoot = this.moduleRootItemsByPath.get(pathValue);
+    if (moduleRoot) {
+      return moduleRoot;
+    }
+
+    const moduleItem = this.moduleYamlItemsByPath.get(pathValue);
+    if (moduleItem) {
+      return moduleItem;
+    }
+
     for (const items of this.cache.values()) {
       const found = items.find(item => item.path.toLowerCase() === pathValue.toLowerCase());
       if (found) {
@@ -130,6 +233,40 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     );
   }
 
+  private createModuleRootDisplayItem(item: SitecoreItem): SitecoreTreeItem {
+    return this.createTreeItem({
+      ...item,
+      name: item.path
+    });
+  }
+
+  private async getRawChildren(basePath: string, requestGeneration: number): Promise<SitecoreItem[]> {
+    if (this.cache.has(basePath)) {
+      return this.cache.get(basePath) || [];
+    }
+
+    let items: SitecoreItem[] = [];
+    try {
+      const result = await this.client.getChildren(basePath);
+      items = (result || []).filter((item: SitecoreItem) => item.path !== basePath);
+      items = await this.reconcileIndirectStatuses(items);
+
+      if (requestGeneration !== this.loadGeneration) {
+        return [];
+      }
+
+      if (items.length === 0) {
+        console.warn(`No children returned from GraphQL for ${basePath}`);
+      }
+    } catch (error) {
+      console.warn(`GraphQL load failed for path ${basePath}:`, error);
+      vscode.window.showWarningMessage(`Sitecore GraphQL load failed (${basePath}). ${error instanceof Error ? error.message : ''}`);
+    }
+
+    this.cache.set(basePath, items);
+    return items;
+  }
+
   private normalizePath(pathValue: string): string {
     const trimmed = (pathValue || '').trim();
     if (!trimmed) {
@@ -139,6 +276,433 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     const leadingSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
     const withoutTrailingSlash = leadingSlash.length > 1 ? leadingSlash.replace(/\/+$/, '') : leadingSlash;
     return withoutTrailingSlash || '/sitecore';
+  }
+
+  private getParentPath(pathValue: string): string | undefined {
+    const normalized = this.normalizePath(pathValue);
+    if (normalized === '/sitecore') {
+      return undefined;
+    }
+
+    const lastSlash = normalized.lastIndexOf('/');
+    if (lastSlash <= 0) {
+      return undefined;
+    }
+
+    return normalized.substring(0, lastSlash);
+  }
+
+  private deriveNameFromPath(pathValue: string): string {
+    const normalized = this.normalizePath(pathValue);
+    const idx = normalized.lastIndexOf('/');
+    if (idx < 0 || idx === normalized.length - 1) {
+      return normalized;
+    }
+
+    return normalized.substring(idx + 1);
+  }
+
+  private parseYamlPathAndName(content: string): { path?: string; name?: string } {
+    const lines = content.split(/\r?\n/);
+    let parsedPath: string | undefined;
+    let parsedName: string | undefined;
+
+    for (let i = 0; i < lines.length; i++) {
+      const pathMatch = lines[i].match(/^Path:\s*(.+)\s*$/);
+      if (pathMatch) {
+        parsedPath = this.normalizePath(pathMatch[1]);
+      }
+
+      const hintMatch = lines[i].match(/^\s*Hint:\s*(.+)\s*$/i);
+      if (!hintMatch) {
+        continue;
+      }
+
+      const hint = hintMatch[1].trim().toLowerCase();
+      if (hint !== 'name') {
+        continue;
+      }
+
+      for (let j = i + 1; j < Math.min(lines.length, i + 4); j++) {
+        const valueMatch = lines[j].match(/^\s*Value:\s*(.*)$/i);
+        if (!valueMatch) {
+          continue;
+        }
+
+        const inline = valueMatch[1].trim();
+        if (inline && inline !== '|') {
+          parsedName = inline;
+        }
+        break;
+      }
+    }
+
+    return { path: parsedPath, name: parsedName };
+  }
+
+  private getWorkspaceRootPath(): string | undefined {
+    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+      return undefined;
+    }
+
+    return vscode.workspace.workspaceFolders[0].uri.fsPath;
+  }
+
+  private getExcludePattern(): string {
+    return '{**/node_modules/**,**/dist/**,**/out/**,**/.git/**,**/.vscode-test/**}';
+  }
+
+  private async readJsonFile<T>(uri: vscode.Uri): Promise<T | undefined> {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      return JSON.parse(Buffer.from(bytes).toString('utf8')) as T;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private normalizeModuleName(moduleName: string): string {
+    return moduleName.trim().toLowerCase();
+  }
+
+  private async findSitecoreConfigUris(): Promise<vscode.Uri[]> {
+    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+      return [];
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders[0];
+    return vscode.workspace.findFiles(new vscode.RelativePattern(workspaceFolder, '**/sitecore.json'), this.getExcludePattern());
+  }
+
+  private async loadConfiguredModuleJsonUris(): Promise<vscode.Uri[]> {
+    const sitecoreConfigUris = await this.findSitecoreConfigUris();
+    const moduleUrisByPath = new Map<string, vscode.Uri>();
+
+    for (const sitecoreConfigUri of sitecoreConfigUris) {
+      const sitecoreConfig = await this.readJsonFile<{ modules?: string[] }>(sitecoreConfigUri);
+      const moduleGlobs = Array.isArray(sitecoreConfig?.modules) ? sitecoreConfig.modules : [];
+      if (moduleGlobs.length === 0) {
+        continue;
+      }
+
+      const configDirectory = path.dirname(sitecoreConfigUri.fsPath);
+      for (const moduleGlob of moduleGlobs) {
+        const matchedUris = await vscode.workspace.findFiles(new vscode.RelativePattern(configDirectory, moduleGlob), this.getExcludePattern());
+        for (const matchedUri of matchedUris) {
+          moduleUrisByPath.set(matchedUri.fsPath.toLowerCase(), matchedUri);
+        }
+      }
+    }
+
+    return Array.from(moduleUrisByPath.values());
+  }
+
+  private resolveRulePath(parentPath: string | undefined, rulePath: string | undefined): string | undefined {
+    const trimmedPath = (rulePath || '').trim();
+    if (!trimmedPath) {
+      return undefined;
+    }
+
+    if (trimmedPath.toLowerCase().startsWith('/sitecore')) {
+      return this.normalizePath(trimmedPath);
+    }
+
+    const normalizedParent = parentPath ? this.normalizePath(parentPath) : undefined;
+    if (!normalizedParent) {
+      return trimmedPath.startsWith('/') ? this.normalizePath(trimmedPath) : this.normalizePath(`/${trimmedPath}`);
+    }
+
+    const relativePath = trimmedPath.replace(/^\/+/, '');
+    return this.normalizePath(`${normalizedParent}/${relativePath}`);
+  }
+
+  private flattenPathConfigs(nodes: ModuleSerializationInclude[], parentPath?: string): ModuleSerializationPathConfig[] {
+    const flattened: ModuleSerializationPathConfig[] = [];
+
+    for (const node of nodes) {
+      const resolvedPath = this.resolveRulePath(parentPath, node.path);
+      if (!resolvedPath) {
+        continue;
+      }
+
+      const config: ModuleSerializationPathConfig = {
+        name: node.name,
+        path: resolvedPath,
+        scope: node.scope,
+        database: node.database,
+        allowedPushOperations: node.allowedPushOperations
+      };
+
+      flattened.push(config);
+
+      if (Array.isArray(node.rules) && node.rules.length > 0) {
+        flattened.push(...this.flattenPathConfigs(node.rules, resolvedPath));
+      }
+    }
+
+    return flattened;
+  }
+
+  private async loadModuleSerializationSources(): Promise<ModuleSerializationSource[]> {
+    if (this.availableModulesCache) {
+      const cachedSources: ModuleSerializationSource[] = [];
+      for (const moduleName of this.availableModulesCache) {
+        const source = this.moduleSerializationSourceCache.get(this.normalizeModuleName(moduleName));
+        if (source) {
+          cachedSources.push(source);
+        }
+      }
+
+      if (cachedSources.length === this.availableModulesCache.length) {
+        return cachedSources;
+      }
+    }
+
+    const moduleJsonUris = await this.loadConfiguredModuleJsonUris();
+    const sources: ModuleSerializationSource[] = [];
+    this.moduleSerializationSourceCache.clear();
+
+    for (const jsonUri of moduleJsonUris) {
+      const json = await this.readJsonFile<{
+        namespace?: string;
+        description?: string;
+        items?: { includes?: ModuleSerializationInclude[] };
+      }>(jsonUri);
+      const moduleName = json?.namespace?.trim();
+      const includes = Array.isArray(json?.items?.includes) ? json.items.includes.filter(include => typeof include?.path === 'string' && include.path.trim().length > 0) : [];
+      if (!moduleName || includes.length === 0) {
+        continue;
+      }
+
+      const source: ModuleSerializationSource = {
+        moduleName,
+        description: json?.description,
+        jsonUri,
+        rootUri: vscode.Uri.file(path.dirname(jsonUri.fsPath)),
+        includes,
+        pathConfigs: this.flattenPathConfigs(includes)
+      };
+
+      this.moduleSerializationSourceCache.set(this.normalizeModuleName(moduleName), source);
+      sources.push(source);
+    }
+
+    this.availableModulesCache = sources.map(source => source.moduleName);
+    return sources;
+  }
+
+  private async getConfiguredModules(): Promise<string[]> {
+    const sources = await this.loadModuleSerializationSources();
+    return sources.map(source => source.moduleName);
+  }
+
+  private async getModuleSerializationSource(moduleName: string): Promise<ModuleSerializationSource | undefined> {
+    const normalizedModuleName = this.normalizeModuleName(moduleName);
+    const cached = this.moduleSerializationSourceCache.get(normalizedModuleName);
+    if (cached) {
+      return cached;
+    }
+
+    const sources = await this.loadModuleSerializationSources();
+    return sources.find(source => this.normalizeModuleName(source.moduleName) === normalizedModuleName);
+  }
+
+  private isIgnoredScope(scopeValue?: string): boolean {
+    const normalizedScope = (scopeValue || '').toLowerCase();
+    return normalizedScope.includes('ignored') || normalizedScope.includes('exclude');
+  }
+
+  private allowsDescendants(scopeValue?: string): boolean {
+    const normalizedScope = (scopeValue || 'itemanddescendants').toLowerCase();
+    return normalizedScope !== 'singleitem';
+  }
+
+  private getModulePathMatch(itemPath: string, pathConfigs: ModuleSerializationPathConfig[]): ModulePathMatch | undefined {
+    const normalizedItemPath = this.normalizePath(itemPath).toLowerCase();
+    const selectedDatabase = this.selectedDatabase.toLowerCase();
+    let bestMatch: ModulePathMatch | undefined;
+
+    for (const config of pathConfigs) {
+      if (!config.path) {
+        continue;
+      }
+
+      if (config.database && config.database.toLowerCase() !== selectedDatabase) {
+        continue;
+      }
+
+      const normalizedConfigPath = config.path.toLowerCase();
+      const exactMatch = normalizedItemPath === normalizedConfigPath;
+      const descendantMatch = normalizedItemPath.startsWith(`${normalizedConfigPath}/`);
+
+      if (!exactMatch && !descendantMatch) {
+        continue;
+      }
+
+      if (this.isIgnoredScope(config.scope)) {
+        if (!bestMatch || normalizedConfigPath.length >= bestMatch.config.path.length) {
+          bestMatch = {
+            config,
+            status: SerializationStatus.NotSerialized
+          };
+        }
+        continue;
+      }
+
+      if (descendantMatch && !this.allowsDescendants(config.scope)) {
+        continue;
+      }
+
+      const candidateStatus = exactMatch ? SerializationStatus.Direct : SerializationStatus.Indirect;
+      if (!bestMatch || normalizedConfigPath.length > bestMatch.config.path.length) {
+        bestMatch = {
+          config,
+          status: candidateStatus
+        };
+      }
+    }
+
+    if (bestMatch?.status === SerializationStatus.NotSerialized) {
+      return undefined;
+    }
+
+    return bestMatch;
+  }
+
+  private async findModuleRootDirs(moduleName: string): Promise<vscode.Uri[]> {
+    const source = await this.getModuleSerializationSource(moduleName);
+    if (!source) {
+      return [];
+    }
+
+    return [source.rootUri];
+  }
+
+  private async ensureModuleYamlTreeLoaded(requestGeneration: number): Promise<void> {
+    if (!this.isModuleFilterActive()) {
+      return;
+    }
+
+    const modeKey = `${this.selectedModule}|${this.selectedDatabase}`;
+    if (this.moduleYamlLoadedFor === modeKey) {
+      return;
+    }
+
+    this.moduleYamlRoots = [];
+    this.moduleYamlChildrenByPath.clear();
+    this.moduleYamlItemsByPath.clear();
+    this.moduleRootItemsByPath.clear();
+
+    const source = await this.getModuleSerializationSource(this.selectedModule);
+    const moduleRootDirs = source ? [source.rootUri] : [];
+
+    if (requestGeneration !== this.loadGeneration) {
+      return;
+    }
+
+    const affectedByPath = new Map<string, SitecoreItem>();
+
+    for (const rootDir of moduleRootDirs) {
+      if (requestGeneration !== this.loadGeneration) {
+        return;
+      }
+
+      const yamlPattern = new vscode.RelativePattern(rootDir, 'items/**/*.{yml,yaml}');
+      const yamlUris = await vscode.workspace.findFiles(yamlPattern);
+
+      for (const yamlUri of yamlUris) {
+        if (requestGeneration !== this.loadGeneration) {
+          return;
+        }
+
+        let content = '';
+        try {
+          const bytes = await vscode.workspace.fs.readFile(yamlUri);
+          content = Buffer.from(bytes).toString('utf8');
+        } catch {
+          continue;
+        }
+
+        const parsed = this.parseYamlPathAndName(content);
+        if (!parsed.path || affectedByPath.has(parsed.path)) {
+          continue;
+        }
+
+        const match = source ? this.getModulePathMatch(parsed.path, source.pathConfigs) : undefined;
+        if (!match) {
+          continue;
+        }
+
+        affectedByPath.set(parsed.path, {
+          id: parsed.path,
+          name: parsed.name || this.deriveNameFromPath(parsed.path),
+          path: parsed.path,
+          hasChildren: false,
+          status: match.status,
+          yamlPath: yamlUri.fsPath,
+          matchedModule: this.selectedModule,
+          moduleDescription: source?.description,
+          moduleJsonPath: source?.jsonUri.fsPath,
+          subtreeKey: match.config.name,
+          subtreePath: match.config.path,
+          subtreeScope: match.config.scope,
+          subtreePushOperations: match.config.allowedPushOperations,
+          subtreeDatabase: match.config.database
+        });
+      }
+    }
+
+    this.moduleYamlItemsByPath = new Map(affectedByPath);
+
+    const roots: SitecoreItem[] = [];
+    const childrenByParent = new Map<string, SitecoreItem[]>();
+
+    for (const item of affectedByPath.values()) {
+      const parentPath = this.getParentPath(item.path);
+      if (!parentPath || !affectedByPath.has(parentPath)) {
+        roots.push(item);
+        this.parentPathByPath.delete(item.path);
+        this.moduleRootItemsByPath.set(item.path, item);
+        continue;
+      }
+
+      this.parentPathByPath.set(item.path, parentPath);
+      const siblings = childrenByParent.get(parentPath) || [];
+      siblings.push(item);
+      childrenByParent.set(parentPath, siblings);
+    }
+
+    for (const [parentPath, children] of childrenByParent.entries()) {
+      children.sort((a, b) => a.name.localeCompare(b.name));
+      this.moduleYamlChildrenByPath.set(parentPath, children);
+
+      const parentItem = affectedByPath.get(parentPath);
+      if (parentItem) {
+        parentItem.hasChildren = children.length > 0;
+      }
+    }
+
+    roots.sort((a, b) => a.path.localeCompare(b.path));
+    this.moduleYamlRoots = roots;
+    this.moduleYamlLoadedFor = modeKey;
+  }
+
+  private async buildDisplayedChildren(basePath: string, requestGeneration: number, displayedParentPath: string): Promise<SitecoreItem[]> {
+    if (this.isModuleFilterActive()) {
+      await this.ensureModuleYamlTreeLoaded(requestGeneration);
+      const children = this.moduleYamlChildrenByPath.get(basePath) || [];
+      for (const item of children) {
+        this.parentPathByPath.set(item.path, displayedParentPath);
+      }
+      return children;
+    }
+
+    const rawChildren = await this.getRawChildren(basePath, requestGeneration);
+    for (const item of rawChildren) {
+      this.parentPathByPath.set(item.path, displayedParentPath);
+    }
+
+    return rawChildren;
   }
 
   async findPathChain(pathValue: string): Promise<SitecoreTreeItem[] | undefined> {
@@ -184,8 +748,13 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   async getChildren(element?: SitecoreTreeItem): Promise<SitecoreTreeItem[]> {
     const requestGeneration = this.loadGeneration;
 
-    // If no element, return the root /sitecore node
+    // If no element, return roots depending on active module filter mode.
     if (!element) {
+      if (this.isModuleFilterActive()) {
+        await this.ensureModuleYamlTreeLoaded(requestGeneration);
+        return this.moduleYamlRoots.map(item => this.createModuleRootDisplayItem(item));
+      }
+
       const rootItem: SitecoreItem = {
         id: 'sitecore-root',
         name: 'sitecore',
@@ -199,41 +768,17 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
     const basePath = element.item.path;
 
-    if (this.cache.has(basePath)) {
-      const cachedItems = this.cache.get(basePath) || [];
-      return cachedItems.map(item => this.createTreeItem(item));
-    }
-
-    let items: SitecoreItem[] = [];
-    try {
-      const result = await this.client.getChildren(basePath);
-      // Filter out any children that are the same as parent (self-reference)
-      items = (result || []).filter((item: SitecoreItem) => item.path !== basePath);
-      items = await this.reconcileIndirectStatuses(items);
-
-      // If a hard reset happened while this request was in flight, discard stale results.
-      if (requestGeneration !== this.loadGeneration) {
-        return [];
-      }
-
-      if (items.length === 0) {
-        console.warn(`No children returned from GraphQL for ${basePath}`);
-      }
-    } catch (error) {
-      console.warn(`GraphQL load failed for path ${basePath}:`, error);
-      vscode.window.showWarningMessage(`Sitecore GraphQL load failed (${basePath}). ${error instanceof Error ? error.message : ''}`);
-    }
-
-    this.cache.set(basePath, items);
-    for (const item of items) {
-      this.parentPathByPath.set(item.path, basePath);
-    }
-
-    return items.map(item => this.createTreeItem(item));
+    const displayedItems = await this.buildDisplayedChildren(basePath, requestGeneration, basePath);
+    return displayedItems.map(item => this.createTreeItem(item));
   }
 
   refresh(options?: { resetState?: boolean }): void {
     this.cache.clear();
+    this.moduleYamlRoots = [];
+    this.moduleYamlChildrenByPath.clear();
+    this.moduleYamlItemsByPath.clear();
+    this.moduleYamlLoadedFor = undefined;
+    this.moduleRootItemsByPath.clear();
     this.parentPathByPath.clear();
     this.explainStatusCache.clear();
 
@@ -241,6 +786,8 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       this.loadGeneration += 1;
       this.client.reset();
       this.client.setDatabase(this.selectedDatabase);
+      this.availableModulesCache = undefined;
+      this.moduleSerializationSourceCache.clear();
     }
 
     this._onDidChangeTreeData.fire();

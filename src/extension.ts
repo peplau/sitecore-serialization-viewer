@@ -126,6 +126,27 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(treeView);
 
+	const expandVisibleBranch = async (node: SitecoreTreeItem): Promise<void> => {
+		if (!node.item.hasChildren) {
+			return;
+		}
+
+		// Expand first so the tree shows its built-in loading state while children are fetched.
+		await treeView.reveal(node, { expand: true, focus: false, select: false });
+		const children = await treeProvider.getChildren(node);
+
+		for (const child of children) {
+			await expandVisibleBranch(child);
+		}
+	};
+
+	const expandVisibleModuleTree = async (): Promise<void> => {
+		const roots = await treeProvider.getChildren();
+		for (const root of roots) {
+			await expandVisibleBranch(root);
+		}
+	};
+
 	const databaseStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
 	const updateDatabaseStatus = () => {
 		databaseStatus.text = `Sitecore DB: ${treeProvider.getSelectedDatabase()} $(chevron-down)`;
@@ -135,6 +156,16 @@ export function activate(context: vscode.ExtensionContext) {
 	updateDatabaseStatus();
 	databaseStatus.command = 'sitecore-serialization-viewer.selectDatabase';
 	databaseStatus.show();
+
+	const moduleStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9);
+	const updateModuleStatus = () => {
+		moduleStatus.text = `Module: ${treeProvider.getSelectedModule()} $(chevron-down)`;
+		moduleStatus.name = 'Sitecore Module Selector';
+		moduleStatus.tooltip = 'Select module filter for content tree';
+	};
+	updateModuleStatus();
+	moduleStatus.command = 'sitecore-serialization-viewer.selectModule';
+	moduleStatus.show();
 
 	// Register commands
 	const refreshTreeCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.refreshTree', async () => {
@@ -163,6 +194,33 @@ export function activate(context: vscode.ExtensionContext) {
 		updateDatabaseStatus();
 		await vscode.commands.executeCommand('workbench.actions.treeView.sitecoreContentTree.collapseAll');
 		treeProvider.refresh({ resetState: true });
+	});
+
+	const selectModuleCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.selectModule', async () => {
+		const current = treeProvider.getSelectedModule();
+		const moduleOptions = ['All modules', ...(await treeProvider.getAvailableModules())];
+		const selection = await vscode.window.showQuickPick(
+			moduleOptions.map(label => ({ label, description: label === current ? 'Current' : '' })),
+			{
+				title: 'Select Module',
+				placeHolder: 'Choose module filter for content tree'
+			}
+		);
+
+		if (!selection || selection.label === current) {
+			return;
+		}
+
+		treeProvider.setSelectedModule(selection.label);
+		updateModuleStatus();
+		treeProvider.refresh();
+
+		if (selection.label === 'All modules') {
+			await vscode.commands.executeCommand('workbench.actions.treeView.sitecoreContentTree.collapseAll');
+			return;
+		}
+
+		await expandVisibleModuleTree();
 	});
 
 	const copyPathCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.copyPath', (item: SitecoreTreeItem) => {
@@ -253,10 +311,12 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		databaseStatus,
+		moduleStatus,
 		disposable,
 		refreshTreeCommand,
 		searchPathCommand,
 		selectDatabaseCommand,
+		selectModuleCommand,
 		copyPathCommand,
 		showDetailsCommand
 	);

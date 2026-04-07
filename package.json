@@ -67,6 +67,11 @@
         "command": "sitecore-serialization-viewer.searchPath",
         "title": "Search Sitecore Path",
         "icon": "$(search)"
+      },
+      {
+        "command": "sitecore-serialization-viewer.selectModule",
+        "title": "Select Module",
+        "icon": "$(list-selection)"
       }
     ],
     "views": {

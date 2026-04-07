@@ -52,7 +52,7 @@ export class AuthoringGraphqlClient {
     const hostFromEnv = envVars['SITECORE_EDGE_HOSTNAME'];
     const contextId = envVars['SITECORE_EDGE_CONTEXT_ID'];
     const editingSecret = envVars['SITECORE_EDITING_SECRET'];
-    const authToken = envVars['AUTHORING_BEARER_TOKEN'];
+    const authToken = await this.loadSitecoreAccessToken();
     this.language = config.get<string>('defaultLanguage') || envVars['LANGUAGE'] || 'en';
 
     if (explicitUrl && explicitUrl.trim().length > 0) {
@@ -89,9 +89,12 @@ export class AuthoringGraphqlClient {
       const isJwtFormat = parts.length === 3;
 
       headers.Authorization = isBearerToken ? tokenText : `Bearer ${tokenText}`;
-      console.log(`Using Authorization Bearer token from AUTHORING_BEARER_TOKEN (${tokenLength} chars, JWT format: ${isJwtFormat}) for Authoring GraphQL.`);
+      console.log(`Using Authorization Bearer token from .sitecore/user.json accessToken (${tokenLength} chars, JWT format: ${isJwtFormat}) for Authoring GraphQL.`);
     } else {
-      console.warn('AUTHORING_BEARER_TOKEN not found in .env.local or environment. Authoring GraphQL requests will fail.');
+      const loginCommand = 'dotnet sitecore cloud login --allow-write true';
+      const warningMessage = `Sitecore access token not found in .sitecore/user.json. Please login with: ${loginCommand}`;
+      console.warn(warningMessage);
+      vscode.window.showWarningMessage(warningMessage);
     }
 
     this.headers = headers;
@@ -134,6 +137,65 @@ export class AuthoringGraphqlClient {
     return envVars;
   }
 
+  private async loadSitecoreAccessToken(): Promise<string | undefined> {
+    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+      return undefined;
+    }
+
+    const workspaceRoot = vscode.workspace.workspaceFolders[0].uri;
+    const userJsonUri = vscode.Uri.joinPath(workspaceRoot, '.sitecore', 'user.json');
+
+    try {
+      const userJsonContent = await vscode.workspace.fs.readFile(userJsonUri);
+      const content = Buffer.from(userJsonContent).toString('utf8');
+      const parsed = JSON.parse(content) as {
+        accessToken?: unknown;
+        endpoints?: Record<string, { accessToken?: unknown } | unknown>;
+      };
+
+      // Primary expected shape: .sitecore/user.json -> endpoints -> dev -> accessToken
+      const devAccessToken =
+        parsed.endpoints &&
+        typeof parsed.endpoints === 'object' &&
+        parsed.endpoints.dev &&
+        typeof parsed.endpoints.dev === 'object' &&
+        parsed.endpoints.dev !== null &&
+        'accessToken' in parsed.endpoints.dev
+          ? (parsed.endpoints.dev as { accessToken?: unknown }).accessToken
+          : undefined;
+
+      if (typeof devAccessToken === 'string' && devAccessToken.trim().length > 0) {
+        return devAccessToken.trim();
+      }
+
+      // Backward-compatible fallback: top-level accessToken
+      if (typeof parsed.accessToken === 'string' && parsed.accessToken.trim().length > 0) {
+        return parsed.accessToken.trim();
+      }
+
+      // Fallback: first endpoint object that contains an accessToken
+      if (parsed.endpoints && typeof parsed.endpoints === 'object') {
+        for (const endpointValue of Object.values(parsed.endpoints)) {
+          if (
+            endpointValue &&
+            typeof endpointValue === 'object' &&
+            'accessToken' in endpointValue
+          ) {
+            const token = (endpointValue as { accessToken?: unknown }).accessToken;
+            if (typeof token === 'string' && token.trim().length > 0) {
+              return token.trim();
+            }
+          }
+        }
+      }
+    } catch (error) {
+      // File doesn't exist or can't be read/parsed.
+      console.log('Could not read .sitecore/user.json file:', error);
+    }
+
+    return undefined;
+  }
+
   private async executeQuery<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
     await this.ensureInitialized();
 
@@ -158,7 +220,7 @@ export class AuthoringGraphqlClient {
     if (payload.errors && payload.errors.length > 0) {
       const errorMsg = payload.errors.map(e => e.message).join('; ');
       if (errorMsg.toLowerCase().includes('not authorized') || errorMsg.toLowerCase().includes('unauthorized')) {
-        throw new Error(`GraphQL authorization failed: ${errorMsg}. Verify GRAPH_QL_TOKEN is a valid bearer token from Sitecore Identity Server with required permissions.`);
+        throw new Error(`GraphQL authorization failed: ${errorMsg}. Verify .sitecore/user.json has a valid accessToken, or login with: dotnet sitecore cloud login --allow-write true.`);
       }
       throw new Error(`GraphQL errors: ${errorMsg}`);
     }

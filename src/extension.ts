@@ -23,31 +23,30 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	const revealPathInTree = async (pathValue: string) => {
-		const trimmedPath = (pathValue || '').trim();
-		if (!trimmedPath) {
+		const rawValue = (pathValue || '').trim();
+		if (!rawValue) {
 			return;
 		}
 
-		if (!trimmedPath.startsWith('/')) {
-			vscode.window.showWarningMessage('Path searches must start with /sitecore. ID search is not enabled yet.');
+		const normalizedGuid = normalizeGuid(rawValue);
+		const matchedItem = normalizedGuid
+			? await treeProvider.getItemById(normalizedGuid)
+			: await getItemByPathInput(rawValue);
+
+		if (!matchedItem) {
+			vscode.window.showWarningMessage(`Item not found for search value: ${rawValue}`);
 			return;
 		}
 
-		const normalizedPath = trimmedPath.length > 1 ? trimmedPath.replace(/\/+$/, '') : trimmedPath;
+		const normalizedPath = matchedItem.path.length > 1 ? matchedItem.path.replace(/\/+$/, '') : matchedItem.path;
 		if (!normalizedPath.toLowerCase().startsWith('/sitecore')) {
-			vscode.window.showWarningMessage('Path searches must start with /sitecore. ID search is not enabled yet.');
+			vscode.window.showWarningMessage(`Item not found for search value: ${rawValue}`);
 			return;
 		}
 
 		const segments = normalizedPath.split('/').filter(Boolean);
 		if (segments.length === 0 || segments[0].toLowerCase() !== 'sitecore') {
-			vscode.window.showWarningMessage(`Item not found in tree for path: ${trimmedPath}`);
-			return;
-		}
-
-		const matchedItem = await treeProvider.getItemByPath(normalizedPath);
-		if (!matchedItem) {
-			vscode.window.showWarningMessage(`Item not found in tree for path: ${trimmedPath}`);
+			vscode.window.showWarningMessage(`Item not found for search value: ${rawValue}`);
 			return;
 		}
 
@@ -76,7 +75,7 @@ export function activate(context: vscode.ExtensionContext) {
 			currentPath = `${currentPath}/${segments[i]}`;
 			const next = children.find(child => child.item.path.toLowerCase() === currentPath.toLowerCase());
 			if (!next) {
-				vscode.window.showWarningMessage(`Item not found in tree for path: ${trimmedPath}`);
+				vscode.window.showWarningMessage(`Item not found in tree for path: ${normalizedPath}`);
 				return;
 			}
 
@@ -86,10 +85,35 @@ export function activate(context: vscode.ExtensionContext) {
 		await treeView.reveal(current, { expand: false, focus: true, select: true });
 	};
 
+	const getItemByPathInput = async (inputValue: string) => {
+		if (!inputValue.startsWith('/')) {
+			vscode.window.showWarningMessage('Search must be a /sitecore path or a Sitecore item GUID.');
+			return undefined;
+		}
+
+		const normalizedPath = inputValue.length > 1 ? inputValue.replace(/\/+$/, '') : inputValue;
+		if (!normalizedPath.toLowerCase().startsWith('/sitecore')) {
+			vscode.window.showWarningMessage('Path searches must start with /sitecore.');
+			return undefined;
+		}
+
+		return treeProvider.getItemByPath(normalizedPath);
+	};
+
+	const normalizeGuid = (value: string): string | undefined => {
+		const trimmed = value.trim();
+		const stripped = trimmed.replace(/[{}]/g, '');
+		if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(stripped)) {
+			return undefined;
+		}
+
+		return `{${stripped.toUpperCase()}}`;
+	};
+
 	const searchPathCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.searchPath', async () => {
 		const value = await vscode.window.showInputBox({
 			prompt: 'Type the item path or ID',
-			placeHolder: '/sitecore/content/home',
+			placeHolder: '/sitecore/content/home or {FBFE3DAE-E317-4DCE-97D2-94C806896642}',
 			ignoreFocusOut: true
 		});
 

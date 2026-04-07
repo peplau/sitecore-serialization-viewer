@@ -286,6 +286,20 @@ export class AuthoringGraphqlClient {
     return data.item ? this.mapItemResult(data.item) : undefined;
   }
 
+  async getItemById(itemId: string): Promise<SitecoreItem | undefined> {
+    const normalizedItemId = itemId.trim();
+    const selectedDatabase = this.database || 'master';
+
+    const query = `query ItemById($itemId: ID!, $database: String = "master") {\n  item(where: { itemId: $itemId, database: $database }) {\n    itemId\n    name\n    path\n    template { name }\n    children {\n      nodes {\n        itemId\n      }\n    }\n  }\n}`;
+
+    const data = await this.executeQuery<ItemByPathResponse>(query, {
+      itemId: normalizedItemId,
+      database: selectedDatabase
+    });
+
+    return data.item ? this.mapItemResult(data.item) : undefined;
+  }
+
   async getChildren(path: string): Promise<SitecoreItem[]> {
     const normalizedPath = path || '/sitecore';
     const selectedDatabase = this.database || 'master';

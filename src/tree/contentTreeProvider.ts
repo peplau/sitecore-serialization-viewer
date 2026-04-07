@@ -49,6 +49,10 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return this.client.getItemByPath(normalizedPath);
   }
 
+  async getItemById(itemId: string): Promise<SitecoreItem | undefined> {
+    return this.client.getItemById(itemId);
+  }
+
   private readonly fallbackMockData: SitecoreItem[] = [
     {
       id: '1',

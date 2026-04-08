@@ -3,6 +3,7 @@
   "displayName": "Sitecore Serialization Viewer",
   "description": "Helps Sitecore Developers visualize how SCS Serialization is configured in a project",
   "version": "0.0.1",
+  "publisher": "rpeplau",
   "engines": {
     "vscode": "^1.110.0"
   },

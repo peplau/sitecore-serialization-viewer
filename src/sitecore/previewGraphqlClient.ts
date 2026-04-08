@@ -235,7 +235,7 @@ export class AuthoringGraphqlClient {
     if (payload.errors && payload.errors.length > 0) {
       const errorMsg = payload.errors.map(e => e.message).join('; ');
       if (errorMsg.toLowerCase().includes('not authorized') || errorMsg.toLowerCase().includes('unauthorized')) {
-        throw new Error(`GraphQL authorization failed: ${errorMsg}. Verify .sitecore/user.json has a valid accessToken, or login with: dotnet sitecore cloud login --allow-write true.`);
+          throw new Error("Authorization denied: Please login again with 'dotnet sitecore cloud login'");
       }
       throw new Error(`GraphQL errors: ${errorMsg}`);
     }

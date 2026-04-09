@@ -12,6 +12,16 @@ interface ExcludedFieldJson {
   description?: string;
 }
 
+interface RolePredicateJson {
+  domain?: string;
+  pattern?: string;
+}
+
+interface UserPredicateJson {
+  domain?: string;
+  pattern?: string;
+}
+
 interface IncludeJson {
   name?: string;
   path?: string;
@@ -27,8 +37,11 @@ interface ModuleFileJson {
   namespace?: string;
   description?: string;
   references?: string[];
+  roles?: RolePredicateJson[];
+  users?: UserPredicateJson[];
   items?: {
     includes?: IncludeJson[];
+    excludedFields?: ExcludedFieldJson[];
     [key: string]: unknown;
   };
   [key: string]: unknown;
@@ -46,6 +59,16 @@ interface ExcludedFieldFormData {
   description: string;
 }
 
+interface RolePredicateFormData {
+  domain: string;
+  pattern: string;
+}
+
+interface UserPredicateFormData {
+  domain: string;
+  pattern: string;
+}
+
 interface IncludeFormData {
   name: string;
   path: string;
@@ -54,13 +77,15 @@ interface IncludeFormData {
   allowedPushOperations: string;
   maxRelativeDepth?: number;
   rules: RuleFormData[];
-  excludedFields: ExcludedFieldFormData[];
 }
 
 interface ModuleSaveData {
   namespace: string;
   description: string;
   references: string[];
+  roles: RolePredicateFormData[];
+  users: UserPredicateFormData[];
+  excludedFields: ExcludedFieldFormData[];
   includes: IncludeFormData[];
 }
 
@@ -121,6 +146,9 @@ export class EditModulePanel {
 
   private async saveModule(data: ModuleSaveData): Promise<void> {
     const existingIncludes = Array.isArray(this.rawJson.items?.includes) ? this.rawJson.items?.includes ?? [] : [];
+    const existingExcludedFields = Array.isArray(this.rawJson.items?.excludedFields) ? this.rawJson.items.excludedFields : [];
+    const existingRoles = Array.isArray(this.rawJson.roles) ? this.rawJson.roles : [];
+    const existingUsers = Array.isArray(this.rawJson.users) ? this.rawJson.users : [];
 
     const nextIncludes: IncludeJson[] = data.includes.map((inc, includeIndex) => {
       const existingInclude = existingIncludes[includeIndex] ? { ...existingIncludes[includeIndex] } : {};
@@ -180,21 +208,8 @@ export class EditModulePanel {
         delete existingInclude.rules;
       }
 
-      const existingExcludedFields = Array.isArray(existingInclude.excludedFields) ? existingInclude.excludedFields : [];
-      const nextExcludedFields: ExcludedFieldJson[] = inc.excludedFields.map((field, fieldIndex) => {
-        const existingField = existingExcludedFields[fieldIndex] ? { ...existingExcludedFields[fieldIndex] } : {};
-
-        existingField.fieldID = field.fieldID.trim();
-        existingField.description = field.description.trim();
-
-        return existingField;
-      });
-
-      if (nextExcludedFields.length > 0) {
-        existingInclude.excludedFields = nextExcludedFields;
-      } else {
-        delete existingInclude.excludedFields;
-      }
+      // Ensure excluded fields are persisted only at items.excludedFields (top-level sibling of includes).
+      delete existingInclude.excludedFields;
 
       return existingInclude;
     });
@@ -207,24 +222,69 @@ export class EditModulePanel {
       : [];
 
     const description = data.description?.trim();
+    const nextExcludedFields: ExcludedFieldJson[] = Array.isArray(data.excludedFields)
+      ? data.excludedFields.map((field, fieldIndex) => {
+        const existingField = existingExcludedFields[fieldIndex] ? { ...existingExcludedFields[fieldIndex] } : {};
+        existingField.fieldID = field.fieldID.trim();
+        existingField.description = field.description.trim();
+        return existingField;
+      })
+      : [];
+
+    const nextRoles: RolePredicateJson[] = Array.isArray(data.roles)
+      ? data.roles.map((role, roleIndex) => {
+        const existingRole = existingRoles[roleIndex] ? { ...existingRoles[roleIndex] } : {};
+        existingRole.domain = role.domain.trim();
+        existingRole.pattern = role.pattern.trim();
+        return existingRole;
+      })
+      : [];
+
+    const nextUsers: UserPredicateJson[] = Array.isArray(data.users)
+      ? data.users.map((user, userIndex) => {
+        const existingUser = existingUsers[userIndex] ? { ...existingUsers[userIndex] } : {};
+        existingUser.domain = user.domain.trim();
+        existingUser.pattern = user.pattern.trim();
+        return existingUser;
+      })
+      : [];
+
     const {
       namespace: _existingNamespace,
       description: _existingDescription,
       references: _existingReferences,
+      roles: _existingRoles,
+      users: _existingUsers,
       items: existingItems,
       ...restRaw
     } = this.rawJson;
 
-    const merged: ModuleFileJson = {
+    const mergedItems: Record<string, unknown> = {
+      ...(existingItems ?? {}),
+      includes: nextIncludes
+    };
+
+    if (nextExcludedFields.length > 0) {
+      mergedItems.excludedFields = nextExcludedFields;
+    } else {
+      delete mergedItems.excludedFields;
+    }
+
+    const mergedBase: ModuleFileJson = {
       namespace: data.namespace,
       ...(references.length > 0 ? { references } : {}),
       ...(description ? { description } : {}),
       ...restRaw,
-      items: {
-        ...(existingItems ?? {}),
-        includes: nextIncludes
-      }
+      items: mergedItems
     };
+
+    let merged: ModuleFileJson = mergedBase;
+    if (nextRoles.length > 0) {
+      merged = { ...merged, roles: nextRoles };
+    }
+    if (nextUsers.length > 0) {
+      merged = { ...merged, users: nextUsers };
+    }
 
     try {
       await vscode.workspace.fs.writeFile(
@@ -250,17 +310,34 @@ export class EditModulePanel {
 
   private buildInitialDataJson(): string {
     const includes = this.rawJson.items?.includes ?? [];
+    const excludedFields = Array.isArray(this.rawJson.items?.excludedFields)
+      ? this.rawJson.items.excludedFields
+      : includes.flatMap(inc => Array.isArray(inc.excludedFields) ? inc.excludedFields : []);
     const references = Array.isArray(this.rawJson.references)
       ? this.rawJson.references
         .filter(reference => typeof reference === 'string')
         .map(reference => reference.trim())
         .filter(reference => reference.length > 0)
       : [];
+    const roles = Array.isArray(this.rawJson.roles) ? this.rawJson.roles : [];
+    const users = Array.isArray(this.rawJson.users) ? this.rawJson.users : [];
 
     return JSON.stringify({
       namespace: this.rawJson.namespace ?? '',
       description: this.rawJson.description ?? '',
       references,
+      roles: roles.map(role => ({
+        domain: role.domain ?? '',
+        pattern: role.pattern ?? ''
+      })),
+      users: users.map(user => ({
+        domain: user.domain ?? '',
+        pattern: user.pattern ?? ''
+      })),
+      excludedFields: excludedFields.map(field => ({
+        fieldID: field.fieldID ?? '',
+        description: field.description ?? ''
+      })),
       includes: includes.map(inc => ({
         name: inc.name ?? '',
         path: inc.path ?? '',
@@ -273,10 +350,6 @@ export class EditModulePanel {
           scope: rule.scope ?? '',
           alias: rule.alias ?? '',
           allowedPushOperations: rule.allowedPushOperations ?? '__inherited__'
-        })),
-        excludedFields: (inc.excludedFields ?? []).map(field => ({
-          fieldID: field.fieldID ?? '',
-          description: field.description ?? ''
         }))
       }))
     });
@@ -370,6 +443,7 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
   margin-bottom: 0;
   padding: 10px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--card-border) 60%, transparent);
+  cursor: grab;
 }
 .include-label {
   font-size: 12px;
@@ -552,8 +626,14 @@ button { cursor: pointer; font: inherit; }
 .scroll-to-top:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .expand-collapse-buttons {
   display: flex;
-  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 12px;
+}
+.expand-collapse-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .expand-collapse-btn {
   background: transparent;
@@ -605,6 +685,15 @@ button { cursor: pointer; font: inherit; }
 .include-content {
   padding: 14px;
 }
+.include-block.dragging {
+  opacity: 0.65;
+}
+.include-block.drop-before {
+  box-shadow: inset 0 3px 0 0 var(--accent);
+}
+.include-block.drop-after {
+  box-shadow: inset 0 -3px 0 0 var(--accent);
+}
 .excluded-fields-card {
   background: var(--card-bg);
   border: 1px solid var(--card-border);
@@ -612,6 +701,51 @@ button { cursor: pointer; font: inherit; }
   padding: 20px;
   margin-bottom: 14px;
   position: relative;
+}
+.roles-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 14px;
+  position: relative;
+}
+.roles-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent);
+}
+.roles-section { margin-top: 20px; }
+.roles-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.role-block {
+  background: color-mix(in srgb, var(--vscode-editor-background) 75%, var(--card-bg) 25%);
+  border: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  border-radius: 8px;
+  padding: 14px;
+}
+.role-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.role-field { display: flex; flex-direction: column; gap: 5px; }
+.role-remove-row {
+  grid-column: span 2;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.helper-text {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 </style>
 </head>
@@ -623,6 +757,8 @@ button { cursor: pointer; font: inherit; }
     <button type="button" class="nav-btn" id="nav-module">Module</button>
     <button type="button" class="nav-btn" id="nav-includes">Includes</button>
     <button type="button" class="nav-btn" id="nav-excluded-fields">Excluded Fields</button>
+    <button type="button" class="nav-btn" id="nav-roles">Roles</button>
+    <button type="button" class="nav-btn" id="nav-users">Users</button>
   </div>
   <button type="button" id="btn-save-top" class="btn-save">Save Module</button>
 </nav>
@@ -650,11 +786,13 @@ button { cursor: pointer; font: inherit; }
 
 <div class="section-header" id="section-includes">
   <h2>Includes</h2>
-  <button type="button" id="btn-add-include" class="btn-secondary">+ Add Include</button>
 </div>
 <div class="expand-collapse-buttons">
-  <button type="button" id="btn-expand-all" class="expand-collapse-btn">Expand All</button>
-  <button type="button" id="btn-collapse-all" class="expand-collapse-btn">Collapse All</button>
+  <div class="expand-collapse-left">
+    <button type="button" id="btn-expand-all" class="expand-collapse-btn">Expand All</button>
+    <button type="button" id="btn-collapse-all" class="expand-collapse-btn">Collapse All</button>
+  </div>
+  <button type="button" id="btn-add-include" class="expand-collapse-btn">+ Add Include</button>
 </div>
 <div id="includes-container"></div>
 
@@ -663,6 +801,20 @@ button { cursor: pointer; font: inherit; }
     <h2>Excluded Fields</h2>
   </div>
   <div id="excluded-fields-container"></div>
+</div>
+
+<div id="section-roles">
+  <div class="section-header">
+    <h2>Roles</h2>
+  </div>
+  <div id="roles-container"></div>
+</div>
+
+<div id="section-users">
+  <div class="section-header">
+    <h2>Users</h2>
+  </div>
+  <div id="users-container"></div>
 </div>
 
 <div class="form-actions">
@@ -675,7 +827,11 @@ button { cursor: pointer; font: inherit; }
   const vscode = acquireVsCodeApi();
   const data = JSON.parse(document.getElementById('initial-data').textContent);
   data.references = Array.isArray(data.references) ? data.references : [];
+  data.roles = Array.isArray(data.roles) ? data.roles : [];
+  data.users = Array.isArray(data.users) ? data.users : [];
+  data.excludedFields = Array.isArray(data.excludedFields) ? data.excludedFields : [];
   let idCounter = data.includes.length;
+  let draggedInclude = null;
 
   function esc(str) {
     return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -755,7 +911,7 @@ button { cursor: pointer; font: inherit; }
     var rulesHtml = (inc.rules || []).map(ruleHtml).join('');
 
       return '<div class="include-block collapsed" data-id="' + id + '">' +
-        '<div class="include-header">' +
+        '<div class="include-header include-drag-handle" draggable="true">' +
           '<div class="include-title-row">' +
             '<button type="button" class="include-toggle">▶</button>' +
             '<span class="include-name-display">' + esc(inc.name || '(Unnamed)') + '</span>' +
@@ -806,24 +962,20 @@ button { cursor: pointer; font: inherit; }
     '</div>';
   }
 
-  function excludedFieldsCardHtml(id, excludedFields) {
+  function excludedFieldsCardHtml(excludedFields) {
     var excludedFieldsHtml = (excludedFields || []).map(excludedFieldHtml).join('');
-    
-    if (!excludedFieldsHtml) {
-      return '<div class="excluded-fields-card" data-include-id="' + id + '" style="display:none"></div>';
-    }
 
-    return '<div class="excluded-fields-card" data-include-id="' + id + '">' +
+    return '<div class="excluded-fields-card">' +
       '<button type="button" class="scroll-to-top" style="position: absolute; top: 14px; right: 14px;" title="Scroll to top">Top</button>' +
       '<div class="include-header">' +
-        '<span class="include-label">Excluded Fields (Include #' + (id + 1) + ')</span>' +
+        '<span class="include-label">Excluded Fields</span>' +
       '</div>' +
       '<div class="excluded-fields-section">' +
         '<div class="excluded-fields-header">' +
           '<h3>Fields</h3>' +
-          '<button type="button" class="btn-secondary-sm btn-add-excluded-field" data-include-id="' + id + '">+ Add Excluded Field</button>' +
+          '<button type="button" class="btn-secondary-sm btn-add-excluded-field">+ Add Excluded Field</button>' +
         '</div>' +
-        '<div class="excluded-fields-container" data-include-id="' + id + '">' + excludedFieldsHtml + '</div>' +
+        '<div class="excluded-fields-container" id="excluded-fields-list">' + excludedFieldsHtml + '</div>' +
       '</div>' +
     '</div>';
   }
@@ -832,6 +984,78 @@ button { cursor: pointer; font: inherit; }
     return '<div class="reference-row">' +
       '<input class="reference-value" type="text" value="' + esc(reference) + '" placeholder="e.g. Foundation.*">' +
       '<button type="button" class="btn-danger-sm btn-remove-reference">Remove</button>' +
+    '</div>';
+  }
+
+  function rolePredicateHtml(role) {
+    return '<div class="role-block role-only-block">' +
+      '<div class="role-fields">' +
+        '<div class="role-field">' +
+          '<label>Domain<span class="req">*</span></label>' +
+          '<input class="role-domain" type="text" value="' + esc(role.domain) + '" required placeholder="e.g. sitecore">' +
+        '</div>' +
+        '<div class="role-field">' +
+          '<label>Pattern<span class="req">*</span></label>' +
+          '<input class="role-pattern" type="text" value="' + esc(role.pattern) + '" required placeholder="e.g. ^MySite.*$">' +
+          '<span class="helper-text">Regex pattern used to include matching roles within the selected domain.</span>' +
+        '</div>' +
+        '<div class="role-remove-row">' +
+          '<button type="button" class="btn-danger-sm btn-remove-role">Remove Role Predicate</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function rolesCardHtml(roles) {
+    var rolesHtml = (roles || []).map(rolePredicateHtml).join('');
+    return '<div class="roles-card">' +
+      '<button type="button" class="scroll-to-top" style="position: absolute; top: 14px; right: 14px;" title="Scroll to top">Top</button>' +
+      '<div class="include-header">' +
+        '<span class="include-label">Roles</span>' +
+      '</div>' +
+      '<div class="roles-section">' +
+        '<div class="roles-header">' +
+          '<h3>Role Predicates</h3>' +
+          '<button type="button" class="btn-secondary-sm" id="btn-add-role">+ Add Role Predicate</button>' +
+        '</div>' +
+        '<div class="roles-container" id="role-predicates-container">' + rolesHtml + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function userPredicateHtml(user) {
+    return '<div class="role-block user-block">' +
+      '<div class="role-fields">' +
+        '<div class="role-field">' +
+          '<label>Domain<span class="req">*</span></label>' +
+          '<input class="user-domain" type="text" value="' + esc(user.domain) + '" required placeholder="e.g. sitecore">' +
+        '</div>' +
+        '<div class="role-field">' +
+          '<label>Pattern<span class="req">*</span></label>' +
+          '<input class="user-pattern" type="text" value="' + esc(user.pattern) + '" required placeholder="e.g. ^MySite.*$">' +
+          '<span class="helper-text">Regex pattern used to include matching users within the selected domain.</span>' +
+        '</div>' +
+        '<div class="role-remove-row">' +
+          '<button type="button" class="btn-danger-sm btn-remove-user">Remove User Predicate</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function usersCardHtml(users) {
+    var usersHtml = (users || []).map(userPredicateHtml).join('');
+    return '<div class="roles-card">' +
+      '<button type="button" class="scroll-to-top" style="position: absolute; top: 14px; right: 14px;" title="Scroll to top">Top</button>' +
+      '<div class="include-header">' +
+        '<span class="include-label">Users</span>' +
+      '</div>' +
+      '<div class="roles-section">' +
+        '<div class="roles-header">' +
+          '<h3>User Predicates</h3>' +
+          '<button type="button" class="btn-secondary-sm" id="btn-add-user">+ Add User Predicate</button>' +
+        '</div>' +
+        '<div class="roles-container" id="user-predicates-container">' + usersHtml + '</div>' +
+      '</div>' +
     '</div>';
   }
 
@@ -846,18 +1070,28 @@ button { cursor: pointer; font: inherit; }
 
   function renderIncludes() {
     var container = document.getElementById('includes-container');
-    var excludedFieldsContainer = document.getElementById('excluded-fields-container');
-    
     var includesHtml = '';
-    var excludedFieldsHtml = '';
-    
+
     for (var i = 0; i < data.includes.length; i++) {
       includesHtml += includeHtml(i, data.includes[i]);
-      excludedFieldsHtml += excludedFieldsCardHtml(i, data.includes[i].excludedFields || []);
     }
-    
+
     container.innerHTML = includesHtml;
-    excludedFieldsContainer.innerHTML = excludedFieldsHtml;
+  }
+
+  function renderExcludedFields() {
+    var container = document.getElementById('excluded-fields-container');
+    container.innerHTML = excludedFieldsCardHtml(data.excludedFields || []);
+  }
+
+  function renderRoles() {
+    var container = document.getElementById('roles-container');
+    container.innerHTML = rolesCardHtml(data.roles || []);
+  }
+
+  function renderUsers() {
+    var container = document.getElementById('users-container');
+    container.innerHTML = usersCardHtml(data.users || []);
   }
 
   function focusAndScroll(el) {
@@ -868,8 +1102,33 @@ button { cursor: pointer; font: inherit; }
     }
   }
 
+  function clearIncludeDropIndicators() {
+    document.querySelectorAll('.include-block.drop-before, .include-block.drop-after').forEach(function(block) {
+      block.classList.remove('drop-before');
+      block.classList.remove('drop-after');
+    });
+  }
+
+  function getDragAfterElement(container, y) {
+    var blocks = Array.from(container.querySelectorAll('.include-block:not(.dragging)'));
+    var closest = { offset: Number.NEGATIVE_INFINITY, element: null };
+
+    blocks.forEach(function(block) {
+      var rect = block.getBoundingClientRect();
+      var offset = y - rect.top - rect.height / 2;
+      if (offset < 0 && offset > closest.offset) {
+        closest = { offset: offset, element: block };
+      }
+    });
+
+    return closest.element;
+  }
+
   renderIncludes();
   renderReferences();
+  renderExcludedFields();
+  renderRoles();
+  renderUsers();
 
   document.getElementById('namespace').addEventListener('input', function() {
     document.getElementById('title-ns').textContent = this.value;
@@ -902,6 +1161,18 @@ button { cursor: pointer; font: inherit; }
     if (target.id === 'nav-excluded-fields') {
       var excludedSection = document.getElementById('section-excluded-fields');
       if (excludedSection) { excludedSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      return;
+    }
+
+    if (target.id === 'nav-roles') {
+      var rolesSection = document.getElementById('section-roles');
+      if (rolesSection) { rolesSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      return;
+    }
+
+    if (target.id === 'nav-users') {
+      var usersSection = document.getElementById('section-users');
+      if (usersSection) { usersSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
       return;
     }
 
@@ -938,11 +1209,7 @@ button { cursor: pointer; font: inherit; }
     if (target.classList.contains('btn-remove-include')) {
       var block = target.closest('.include-block');
       if (block) {
-        var id = block.getAttribute('data-id');
         block.remove();
-        // Also remove corresponding excluded fields card
-        var excludedCard = document.querySelector('.excluded-fields-card[data-include-id="' + id + '"]');
-        if (excludedCard) { excludedCard.remove(); }
       }
       return;
     }
@@ -970,15 +1237,7 @@ button { cursor: pointer; font: inherit; }
     }
 
     if (target.classList.contains('btn-add-excluded-field')) {
-      var includeId = target.getAttribute('data-include-id');
-      var fieldsContainer = document.querySelector('.excluded-fields-container[data-include-id="' + includeId + '"]');
-      if (!fieldsContainer) {
-        // Field might be in include block for legacy support
-        var incBlock = target.closest('.included-block');
-        if (incBlock) {
-          fieldsContainer = incBlock.querySelector('.excluded-fields-container');
-        }
-      }
+      var fieldsContainer = document.getElementById('excluded-fields-list');
       if (fieldsContainer) {
         var tmp = document.createElement('div');
         tmp.innerHTML = excludedFieldHtml({ fieldID: '', description: '' });
@@ -1002,6 +1261,42 @@ button { cursor: pointer; font: inherit; }
       return;
     }
 
+    if (target.id === 'btn-add-role') {
+      var rolesList = document.getElementById('role-predicates-container');
+      if (!rolesList) { return; }
+      var tmpRole = document.createElement('div');
+      tmpRole.innerHTML = rolePredicateHtml({ domain: '', pattern: '' });
+      var newRole = tmpRole.firstChild;
+      rolesList.appendChild(newRole);
+      var firstRoleField = newRole && newRole.querySelector ? newRole.querySelector('.role-domain') : null;
+      focusAndScroll(firstRoleField);
+      return;
+    }
+
+    if (target.classList.contains('btn-remove-role')) {
+      var role = target.closest('.role-only-block');
+      if (role) { role.remove(); }
+      return;
+    }
+
+    if (target.id === 'btn-add-user') {
+      var usersList = document.getElementById('user-predicates-container');
+      if (!usersList) { return; }
+      var tmpUser = document.createElement('div');
+      tmpUser.innerHTML = userPredicateHtml({ domain: '', pattern: '' });
+      var newUser = tmpUser.firstChild;
+      usersList.appendChild(newUser);
+      var firstUserField = newUser && newUser.querySelector ? newUser.querySelector('.user-domain') : null;
+      focusAndScroll(firstUserField);
+      return;
+    }
+
+    if (target.classList.contains('btn-remove-user')) {
+      var user = target.closest('.user-block');
+      if (user) { user.remove(); }
+      return;
+    }
+
     if (target.id === 'btn-add-reference') {
       var referencesContainer = document.getElementById('references-container');
       var tmpRef = document.createElement('div');
@@ -1019,18 +1314,21 @@ button { cursor: pointer; font: inherit; }
       tmp.innerHTML = includeHtml(idCounter++, {
         name: '', path: '', database: '',
         scope: '', allowedPushOperations: '',
-        maxRelativeDepth: '', rules: [], excludedFields: []
+        maxRelativeDepth: '', rules: []
       });
       var newInclude = tmp.firstChild;
       container.appendChild(newInclude);
-      
-      // Also add empty excluded fields card
-      var excludedFieldsContainer = document.getElementById('excluded-fields-container');
-      var tmpExcluded = document.createElement('div');
-      tmpExcluded.innerHTML = excludedFieldsCardHtml(idCounter - 1, []);
-      excludedFieldsContainer.appendChild(tmpExcluded.firstChild);
-      
-      
+
+      if (newInclude && newInclude.classList && newInclude.classList.contains('collapsed')) {
+        newInclude.classList.remove('collapsed');
+        var toggle = newInclude.querySelector('.include-toggle');
+        if (toggle) { toggle.textContent = '▼'; }
+      }
+
+      if (newInclude && typeof newInclude.scrollIntoView === 'function') {
+        newInclude.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+
       var firstIncludeField = newInclude && newInclude.querySelector ? newInclude.querySelector('.inc-name') : null;
       focusAndScroll(firstIncludeField);
       return;
@@ -1041,10 +1339,78 @@ button { cursor: pointer; font: inherit; }
     }
   });
 
+  document.addEventListener('dragstart', function(evt) {
+    var target = evt.target;
+    if (!(target instanceof Element)) { return; }
+
+    var dragHandle = target.closest('.include-drag-handle');
+    if (!dragHandle) { return; }
+
+    var includeBlock = dragHandle.closest('.include-block');
+    if (!includeBlock) { return; }
+
+    draggedInclude = includeBlock;
+    includeBlock.classList.add('dragging');
+    if (evt.dataTransfer) {
+      evt.dataTransfer.effectAllowed = 'move';
+      evt.dataTransfer.setData('text/plain', includeBlock.getAttribute('data-id') || '');
+    }
+  });
+
+  document.addEventListener('dragover', function(evt) {
+    if (!draggedInclude) { return; }
+
+    var includesContainer = document.getElementById('includes-container');
+    if (!includesContainer) { return; }
+
+    var target = evt.target;
+    if (!(target instanceof Element)) { return; }
+    if (!includesContainer.contains(target)) { return; }
+
+    evt.preventDefault();
+
+    clearIncludeDropIndicators();
+
+    var afterElement = getDragAfterElement(includesContainer, evt.clientY);
+    if (afterElement) {
+      includesContainer.insertBefore(draggedInclude, afterElement);
+      afterElement.classList.add('drop-before');
+      return;
+    }
+
+    includesContainer.appendChild(draggedInclude);
+
+    var blocks = includesContainer.querySelectorAll('.include-block:not(.dragging)');
+    if (blocks.length > 0) {
+      blocks[blocks.length - 1].classList.add('drop-after');
+    }
+  });
+
+  document.addEventListener('drop', function(evt) {
+    if (!draggedInclude) { return; }
+
+    var includesContainer = document.getElementById('includes-container');
+    if (!includesContainer) { return; }
+
+    var target = evt.target;
+    if (!(target instanceof Element)) { return; }
+    if (!includesContainer.contains(target)) { return; }
+
+    evt.preventDefault();
+    clearIncludeDropIndicators();
+  });
+
+  document.addEventListener('dragend', function() {
+    if (draggedInclude) {
+      draggedInclude.classList.remove('dragging');
+      draggedInclude = null;
+    }
+    clearIncludeDropIndicators();
+  });
+
   function collectData() {
     var includes = [];
     document.querySelectorAll('.include-block').forEach(function(incEl) {
-      var id = incEl.getAttribute('data-id');
       var rules = [];
       incEl.querySelectorAll('.rule-block').forEach(function(ruleEl) {
         var pushOps = ruleEl.querySelector('.rule-push-ops').value;
@@ -1055,19 +1421,7 @@ button { cursor: pointer; font: inherit; }
           allowedPushOperations: pushOps === '__inherited__' ? undefined : pushOps
         });
       });
-      
-      // Collect excluded fields from the separated card
-      var excludedFields = [];
-      var excludedCard = document.querySelector('.excluded-fields-card[data-include-id="' + id + '"]');
-      if (excludedCard) {
-        excludedCard.querySelectorAll('.excluded-field-block').forEach(function(fieldEl) {
-          excludedFields.push({
-            fieldID: fieldEl.querySelector('.excluded-field-id').value.trim(),
-            description: fieldEl.querySelector('.excluded-field-description').value.trim()
-          });
-        });
-      }
-      
+
       var maxDepthRaw = incEl.querySelector('.inc-max-depth').value.trim();
       var maxDepth = parseInt(maxDepthRaw, 10);
       includes.push({
@@ -1077,8 +1431,7 @@ button { cursor: pointer; font: inherit; }
         scope: incEl.querySelector('.inc-scope').value,
         allowedPushOperations: incEl.querySelector('.inc-push-ops').value,
         maxRelativeDepth: maxDepthRaw && !isNaN(maxDepth) ? maxDepth : undefined,
-        rules: rules,
-        excludedFields: excludedFields
+        rules: rules
       });
     });
     return {
@@ -1087,6 +1440,24 @@ button { cursor: pointer; font: inherit; }
       references: Array.from(document.querySelectorAll('.reference-value'))
         .map(function(el) { return el.value.trim(); })
         .filter(function(value) { return value.length > 0; }),
+      roles: Array.from(document.querySelectorAll('.role-only-block')).map(function(roleEl) {
+        return {
+          domain: roleEl.querySelector('.role-domain').value.trim(),
+          pattern: roleEl.querySelector('.role-pattern').value.trim()
+        };
+      }),
+      users: Array.from(document.querySelectorAll('.user-block')).map(function(userEl) {
+        return {
+          domain: userEl.querySelector('.user-domain').value.trim(),
+          pattern: userEl.querySelector('.user-pattern').value.trim()
+        };
+      }),
+      excludedFields: Array.from(document.querySelectorAll('.excluded-field-block')).map(function(fieldEl) {
+        return {
+          fieldID: fieldEl.querySelector('.excluded-field-id').value.trim(),
+          description: fieldEl.querySelector('.excluded-field-description').value.trim()
+        };
+      }),
       includes: includes
     };
   }
@@ -1099,7 +1470,7 @@ button { cursor: pointer; font: inherit; }
       return;
     }
     var valid = true;
-    document.querySelectorAll('.inc-name, .inc-path, .rule-path, .excluded-field-id').forEach(function(el) {
+    document.querySelectorAll('.inc-name, .inc-path, .rule-path, .excluded-field-id, .role-domain, .role-pattern, .user-domain, .user-pattern').forEach(function(el) {
       if (!el.value.trim()) { valid = false; el.style.borderColor = 'var(--danger)'; }
       else { el.style.borderColor = ''; }
     });

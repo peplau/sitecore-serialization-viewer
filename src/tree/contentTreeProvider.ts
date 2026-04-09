@@ -19,6 +19,7 @@ interface ModuleSerializationInclude {
 interface ModuleSerializationSource {
   moduleName: string;
   description?: string;
+  references?: string[];
   jsonUri: vscode.Uri;
   rootUri: vscode.Uri;
   includes: ModuleSerializationInclude[];
@@ -28,6 +29,7 @@ interface ModuleSerializationSource {
 export interface ModuleListingItem {
   namespace: string;
   description?: string;
+  references?: string[];
   jsonFilePath: string;
 }
 
@@ -107,6 +109,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       .map(source => ({
         namespace: source.moduleName,
         description: source.description,
+        references: source.references,
         jsonFilePath: source.jsonUri.fsPath
       }))
       .sort((a, b) => a.namespace.localeCompare(b.namespace));
@@ -115,6 +118,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   async getModuleItemsListingByJsonPath(jsonFilePath: string): Promise<{
     moduleName: string;
     description?: string;
+    references?: string[];
     items: Array<{
       itemPath: string;
       status: 'Serialized directly' | 'Serialized indirectly';
@@ -197,6 +201,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return {
       moduleName: source.moduleName,
       description: source.description,
+      references: source.references,
       items
     };
   }
@@ -487,6 +492,17 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return moduleName.trim().toLowerCase();
   }
 
+  private normalizeReferences(references: unknown): string[] {
+    if (!Array.isArray(references)) {
+      return [];
+    }
+
+    return references
+      .filter(ref => typeof ref === 'string')
+      .map(ref => ref.trim())
+      .filter(ref => ref.length > 0);
+  }
+
   private async findSitecoreConfigUris(): Promise<vscode.Uri[]> {
     if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
       return [];
@@ -599,9 +615,11 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       const json = await this.readJsonFile<{
         namespace?: string;
         description?: string;
+        references?: string[];
         items?: { includes?: ModuleSerializationInclude[] };
       }>(jsonUri);
       const moduleName = json?.namespace?.trim();
+      const references = this.normalizeReferences(json?.references);
       const includes = Array.isArray(json?.items?.includes) ? json.items.includes.filter(include => typeof include?.path === 'string' && include.path.trim().length > 0) : [];
       if (!moduleName || includes.length === 0) {
         continue;
@@ -610,6 +628,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       const source: ModuleSerializationSource = {
         moduleName,
         description: json?.description,
+        references,
         jsonUri,
         rootUri: vscode.Uri.file(path.dirname(jsonUri.fsPath)),
         includes,

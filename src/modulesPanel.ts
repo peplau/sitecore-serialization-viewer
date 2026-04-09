@@ -186,6 +186,12 @@ h1 {
   color: var(--muted);
   line-height: 1.5;
 }
+.references {
+  margin: -6px 0 14px;
+  color: var(--muted);
+  line-height: 1.5;
+  word-break: break-word;
+}
 .entry-link {
   color: var(--vscode-textLink-foreground);
   text-decoration: none;
@@ -249,6 +255,18 @@ h1 {
       ? `<p class="description">${this.escapeHtml(module.description)}</p>`
       : '';
 
+    const references = Array.isArray(module.references)
+      ? module.references.filter(reference => typeof reference === 'string' && reference.trim().length > 0)
+      : [];
+
+    const referencesInline = references.length > 0
+      ? references.map(reference => this.escapeHtml(reference)).join(', ')
+      : '';
+
+    const referencesHtml = referencesInline
+      ? `<p class="references">References: ${referencesInline}</p>`
+      : '';
+
     const entriesHtml = [
       {
         key: 'Module JSON File Path',
@@ -267,6 +285,7 @@ h1 {
           <h2>${this.escapeHtml(module.namespace)}</h2>
         </div>
         ${descriptionHtml}
+        ${referencesHtml}
         ${entriesHtml}
         <div class="card-footer">
           <div class="card-actions">

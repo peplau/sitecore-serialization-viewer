@@ -11,6 +11,7 @@ interface ModuleItemsRow {
 interface ModuleItemsPanelData {
   moduleName: string;
   description?: string;
+  references?: string[];
   items: ModuleItemsRow[];
 }
 
@@ -153,6 +154,14 @@ export class ModuleItemsPanel {
       ? `<p class="description">${this.escapeHtml(this.data.description)}</p>`
       : '';
 
+    const references = Array.isArray(this.data.references)
+      ? this.data.references.filter(reference => typeof reference === 'string' && reference.trim().length > 0)
+      : [];
+
+    const referencesHtml = references.length > 0
+      ? `<p class="references">References: ${references.map(reference => this.escapeHtml(reference)).join(', ')}</p>`
+      : '';
+
     const rowsHtml = this.data.items.length === 0
       ? `<tr><td colspan="4" class="empty-row">No serialized items matched this module and selected database.</td></tr>`
       : this.data.items.map(item => {
@@ -207,6 +216,11 @@ h1 {
   margin: 8px 0 18px;
   color: var(--muted);
 }
+.references {
+  margin: -8px 0 18px;
+  color: var(--muted);
+  word-break: break-word;
+}
 .table-wrap {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -260,6 +274,7 @@ th {
 <body>
   <h1>${this.escapeHtml(this.data.moduleName)}</h1>
   ${descriptionHtml}
+  ${referencesHtml}
   <div class="table-wrap">
     <table>
       <thead>

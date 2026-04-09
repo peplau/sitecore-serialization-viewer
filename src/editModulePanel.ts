@@ -7,6 +7,11 @@ interface RuleJson {
   allowedPushOperations?: string;
 }
 
+interface ExcludedFieldJson {
+  fieldID?: string;
+  description?: string;
+}
+
 interface IncludeJson {
   name?: string;
   path?: string;
@@ -15,11 +20,13 @@ interface IncludeJson {
   allowedPushOperations?: string;
   maxRelativeDepth?: number;
   rules?: RuleJson[];
+  excludedFields?: ExcludedFieldJson[];
 }
 
 interface ModuleFileJson {
   namespace?: string;
   description?: string;
+  references?: string[];
   items?: {
     includes?: IncludeJson[];
     [key: string]: unknown;
@@ -34,6 +41,11 @@ interface RuleFormData {
   allowedPushOperations?: string;
 }
 
+interface ExcludedFieldFormData {
+  fieldID: string;
+  description: string;
+}
+
 interface IncludeFormData {
   name: string;
   path: string;
@@ -42,11 +54,13 @@ interface IncludeFormData {
   allowedPushOperations: string;
   maxRelativeDepth?: number;
   rules: RuleFormData[];
+  excludedFields: ExcludedFieldFormData[];
 }
 
 interface ModuleSaveData {
   namespace: string;
   description: string;
+  references: string[];
   includes: IncludeFormData[];
 }
 
@@ -166,23 +180,51 @@ export class EditModulePanel {
         delete existingInclude.rules;
       }
 
+      const existingExcludedFields = Array.isArray(existingInclude.excludedFields) ? existingInclude.excludedFields : [];
+      const nextExcludedFields: ExcludedFieldJson[] = inc.excludedFields.map((field, fieldIndex) => {
+        const existingField = existingExcludedFields[fieldIndex] ? { ...existingExcludedFields[fieldIndex] } : {};
+
+        existingField.fieldID = field.fieldID.trim();
+        existingField.description = field.description.trim();
+
+        return existingField;
+      });
+
+      if (nextExcludedFields.length > 0) {
+        existingInclude.excludedFields = nextExcludedFields;
+      } else {
+        delete existingInclude.excludedFields;
+      }
+
       return existingInclude;
     });
 
+    const references = Array.isArray(data.references)
+      ? data.references
+        .filter(reference => typeof reference === 'string')
+        .map(reference => reference.trim())
+        .filter(reference => reference.length > 0)
+      : [];
+
+    const description = data.description?.trim();
+    const {
+      namespace: _existingNamespace,
+      description: _existingDescription,
+      references: _existingReferences,
+      items: existingItems,
+      ...restRaw
+    } = this.rawJson;
+
     const merged: ModuleFileJson = {
-      ...this.rawJson,
       namespace: data.namespace,
+      ...(references.length > 0 ? { references } : {}),
+      ...(description ? { description } : {}),
+      ...restRaw,
       items: {
-        ...(this.rawJson.items ?? {}),
+        ...(existingItems ?? {}),
         includes: nextIncludes
       }
     };
-
-    if (data.description?.trim()) {
-      merged.description = data.description.trim();
-    } else {
-      delete merged.description;
-    }
 
     try {
       await vscode.workspace.fs.writeFile(
@@ -208,9 +250,17 @@ export class EditModulePanel {
 
   private buildInitialDataJson(): string {
     const includes = this.rawJson.items?.includes ?? [];
+    const references = Array.isArray(this.rawJson.references)
+      ? this.rawJson.references
+        .filter(reference => typeof reference === 'string')
+        .map(reference => reference.trim())
+        .filter(reference => reference.length > 0)
+      : [];
+
     return JSON.stringify({
       namespace: this.rawJson.namespace ?? '',
       description: this.rawJson.description ?? '',
+      references,
       includes: includes.map(inc => ({
         name: inc.name ?? '',
         path: inc.path ?? '',
@@ -223,6 +273,10 @@ export class EditModulePanel {
           scope: rule.scope ?? '',
           alias: rule.alias ?? '',
           allowedPushOperations: rule.allowedPushOperations ?? '__inherited__'
+        })),
+        excludedFields: (inc.excludedFields ?? []).map(field => ({
+          fieldID: field.fieldID ?? '',
+          description: field.description ?? ''
         }))
       }))
     });
@@ -306,15 +360,15 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
   background: var(--card-bg);
   border: 1px solid var(--card-border);
   border-radius: 12px;
-  padding: 20px;
+  padding: 0;
   margin-bottom: 14px;
 }
 .include-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 18px;
-  padding-bottom: 12px;
+  margin-bottom: 0;
+  padding: 10px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--card-border) 60%, transparent);
 }
 .include-label {
@@ -347,6 +401,34 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
 }
 .rule-field { display: flex; flex-direction: column; gap: 5px; }
 .rule-remove-row {
+  grid-column: span 2;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.excluded-fields-section { margin-top: 20px; }
+.excluded-fields-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--card-border) 50%, transparent);
+}
+.excluded-field-block {
+  background: color-mix(in srgb, var(--vscode-editor-background) 75%, var(--card-bg) 25%);
+  border: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 10px;
+}
+.excluded-field-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.excluded-field-field { display: flex; flex-direction: column; gap: 5px; }
+.excluded-field-remove-row {
   grid-column: span 2;
   display: flex;
   justify-content: flex-end;
@@ -402,6 +484,7 @@ button { cursor: pointer; font: inherit; }
 .form-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 16px;
   margin-top: 28px;
   padding-top: 20px;
@@ -415,16 +498,136 @@ button { cursor: pointer; font: inherit; }
 }
 .feedback { font-size: 12px; color: var(--muted); }
 .feedback.ok { color: #89d185; }
+.references-section {
+  margin-top: 16px;
+}
+.references-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.reference-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.reference-row input {
+  flex: 1;
+}
+.nav-links {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.nav-links-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.nav-btn {
+  background: transparent;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+}
+.nav-btn:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.scroll-to-top {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--card-border) 80%, transparent);
+  border-radius: 6px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.scroll-to-top:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.expand-collapse-buttons {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.expand-collapse-btn {
+  background: transparent;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.expand-collapse-btn:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.include-block.collapsed .include-content {
+  display: none;
+}
+.include-block.collapsed .include-header {
+  border-bottom: none;
+}
+.include-block.collapsed .include-actions-row .scroll-to-top {
+  display: none;
+}
+.include-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  margin-right: 8px;
+  padding: 0;
+  width: 20px;
+  text-align: center;
+}
+.include-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+.include-name-display {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.include-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.include-content {
+  padding: 14px;
+}
+.excluded-fields-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 14px;
+  position: relative;
+}
 </style>
 </head>
 <body>
 <h1>Edit Module: <span id="title-ns">${this.esc(this.rawJson.namespace ?? '')}</span></h1>
 
-<div class="form-actions form-actions-top">
+<nav class="nav-links">
+  <div class="nav-links-left">
+    <button type="button" class="nav-btn" id="nav-module">Module</button>
+    <button type="button" class="nav-btn" id="nav-includes">Includes</button>
+    <button type="button" class="nav-btn" id="nav-excluded-fields">Excluded Fields</button>
+  </div>
   <button type="button" id="btn-save-top" class="btn-save">Save Module</button>
-</div>
+</nav>
 
-<section class="card">
+<section class="card" id="section-module">
   <div class="fields-grid">
     <div class="field span-2">
       <label for="namespace">Namespace<span class="req">*</span></label>
@@ -435,13 +638,32 @@ button { cursor: pointer; font: inherit; }
       <input id="description" type="text" value="${this.esc(this.rawJson.description ?? '')}" placeholder="Optional description">
     </div>
   </div>
+
+  <div class="references-section">
+    <div class="section-header">
+      <h2>References</h2>
+      <button type="button" id="btn-add-reference" class="btn-secondary-sm">+ Add Reference</button>
+    </div>
+    <div id="references-container" class="references-list"></div>
+  </div>
 </section>
 
-<div class="section-header">
+<div class="section-header" id="section-includes">
   <h2>Includes</h2>
   <button type="button" id="btn-add-include" class="btn-secondary">+ Add Include</button>
 </div>
+<div class="expand-collapse-buttons">
+  <button type="button" id="btn-expand-all" class="expand-collapse-btn">Expand All</button>
+  <button type="button" id="btn-collapse-all" class="expand-collapse-btn">Collapse All</button>
+</div>
 <div id="includes-container"></div>
+
+<div id="section-excluded-fields">
+  <div class="section-header">
+    <h2>Excluded Fields</h2>
+  </div>
+  <div id="excluded-fields-container"></div>
+</div>
 
 <div class="form-actions">
   <button type="button" id="btn-save" class="btn-save">Save Module</button>
@@ -452,6 +674,7 @@ button { cursor: pointer; font: inherit; }
 <script>
   const vscode = acquireVsCodeApi();
   const data = JSON.parse(document.getElementById('initial-data').textContent);
+  data.references = Array.isArray(data.references) ? data.references : [];
   let idCounter = data.includes.length;
 
   function esc(str) {
@@ -499,6 +722,24 @@ button { cursor: pointer; font: inherit; }
     '</div>';
   }
 
+  function excludedFieldHtml(field) {
+    return '<div class="excluded-field-block">' +
+      '<div class="excluded-field-fields">' +
+        '<div class="excluded-field-field">' +
+          '<label>Field ID<span class="req">*</span></label>' +
+          '<input class="excluded-field-id" type="text" value="' + esc(field.fieldID) + '" required placeholder="{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}">' +
+        '</div>' +
+        '<div class="excluded-field-field">' +
+          '<label>Description</label>' +
+          '<input class="excluded-field-description" type="text" value="' + esc(field.description) + '" placeholder="Optional description">' +
+        '</div>' +
+        '<div class="excluded-field-remove-row">' +
+          '<button type="button" class="btn-danger-sm btn-remove-excluded-field">Remove Field</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
   function includeHtml(id, inc) {
     var incPushOpts =
       '<option value=""' + (!inc.allowedPushOperations ? ' selected' : '') + '>\u2014 Not set (default: CreateUpdateAndDelete) \u2014</option>' +
@@ -513,11 +754,18 @@ button { cursor: pointer; font: inherit; }
 
     var rulesHtml = (inc.rules || []).map(ruleHtml).join('');
 
-    return '<div class="include-block" data-id="' + id + '">' +
-      '<div class="include-header">' +
-        '<span class="include-label">Include</span>' +
-        '<button type="button" class="btn-danger-text btn-remove-include">Remove Include</button>' +
-      '</div>' +
+      return '<div class="include-block collapsed" data-id="' + id + '">' +
+        '<div class="include-header">' +
+          '<div class="include-title-row">' +
+            '<button type="button" class="include-toggle">▶</button>' +
+            '<span class="include-name-display">' + esc(inc.name || '(Unnamed)') + '</span>' +
+          '</div>' +
+          '<div class="include-actions-row">' +
+            '<button type="button" class="scroll-to-top" title="Scroll to top">Scroll to the top</button>' +
+            '<button type="button" class="btn-danger-sm btn-remove-include">Remove Include</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="include-content">' +
       '<div class="fields-grid">' +
         '<div class="field span-2">' +
           '<label>Name<span class="req">*</span></label>' +
@@ -554,16 +802,62 @@ button { cursor: pointer; font: inherit; }
         '</div>' +
         '<div class="rules-container">' + rulesHtml + '</div>' +
       '</div>' +
+        '</div>' +
     '</div>';
+  }
+
+  function excludedFieldsCardHtml(id, excludedFields) {
+    var excludedFieldsHtml = (excludedFields || []).map(excludedFieldHtml).join('');
+    
+    if (!excludedFieldsHtml) {
+      return '<div class="excluded-fields-card" data-include-id="' + id + '" style="display:none"></div>';
+    }
+
+    return '<div class="excluded-fields-card" data-include-id="' + id + '">' +
+      '<button type="button" class="scroll-to-top" style="position: absolute; top: 14px; right: 14px;" title="Scroll to top">Top</button>' +
+      '<div class="include-header">' +
+        '<span class="include-label">Excluded Fields (Include #' + (id + 1) + ')</span>' +
+      '</div>' +
+      '<div class="excluded-fields-section">' +
+        '<div class="excluded-fields-header">' +
+          '<h3>Fields</h3>' +
+          '<button type="button" class="btn-secondary-sm btn-add-excluded-field" data-include-id="' + id + '">+ Add Excluded Field</button>' +
+        '</div>' +
+        '<div class="excluded-fields-container" data-include-id="' + id + '">' + excludedFieldsHtml + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function referenceHtml(reference) {
+    return '<div class="reference-row">' +
+      '<input class="reference-value" type="text" value="' + esc(reference) + '" placeholder="e.g. Foundation.*">' +
+      '<button type="button" class="btn-danger-sm btn-remove-reference">Remove</button>' +
+    '</div>';
+  }
+
+  function renderReferences() {
+    var container = document.getElementById('references-container');
+    var html = '';
+    for (var i = 0; i < data.references.length; i++) {
+      html += referenceHtml(data.references[i]);
+    }
+    container.innerHTML = html;
   }
 
   function renderIncludes() {
     var container = document.getElementById('includes-container');
-    var html = '';
+    var excludedFieldsContainer = document.getElementById('excluded-fields-container');
+    
+    var includesHtml = '';
+    var excludedFieldsHtml = '';
+    
     for (var i = 0; i < data.includes.length; i++) {
-      html += includeHtml(i, data.includes[i]);
+      includesHtml += includeHtml(i, data.includes[i]);
+      excludedFieldsHtml += excludedFieldsCardHtml(i, data.includes[i].excludedFields || []);
     }
-    container.innerHTML = html;
+    
+    container.innerHTML = includesHtml;
+    excludedFieldsContainer.innerHTML = excludedFieldsHtml;
   }
 
   function focusAndScroll(el) {
@@ -575,6 +869,7 @@ button { cursor: pointer; font: inherit; }
   }
 
   renderIncludes();
+  renderReferences();
 
   document.getElementById('namespace').addEventListener('input', function() {
     document.getElementById('title-ns').textContent = this.value;
@@ -584,9 +879,71 @@ button { cursor: pointer; font: inherit; }
     var target = evt.target;
     if (!(target instanceof Element)) { return; }
 
+      // Scroll to top
+      if (target.classList.contains('scroll-to-top')) {
+        evt.preventDefault();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+
+    // Navigation links
+    if (target.id === 'nav-module') {
+      var moduleSection = document.getElementById('section-module');
+      if (moduleSection) { moduleSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      return;
+    }
+
+    if (target.id === 'nav-includes') {
+      var includesSection = document.getElementById('section-includes');
+      if (includesSection) { includesSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      return;
+    }
+
+    if (target.id === 'nav-excluded-fields') {
+      var excludedSection = document.getElementById('section-excluded-fields');
+      if (excludedSection) { excludedSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      return;
+    }
+
+      // Include toggle
+      if (target.classList.contains('include-toggle')) {
+        var incBlock = target.closest('.include-block');
+        if (incBlock) {
+          incBlock.classList.toggle('collapsed');
+          target.textContent = incBlock.classList.contains('collapsed') ? '▶' : '▼';
+        }
+        return;
+      }
+
+      // Expand all includes
+      if (target.id === 'btn-expand-all') {
+        document.querySelectorAll('.include-block.collapsed').forEach(function(block) {
+          block.classList.remove('collapsed');
+          var toggle = block.querySelector('.include-toggle');
+          if (toggle) { toggle.textContent = '▼'; }
+        });
+        return;
+      }
+
+      // Collapse all includes
+      if (target.id === 'btn-collapse-all') {
+        document.querySelectorAll('.include-block:not(.collapsed)').forEach(function(block) {
+          block.classList.add('collapsed');
+          var toggle = block.querySelector('.include-toggle');
+          if (toggle) { toggle.textContent = '▶'; }
+        });
+        return;
+      }
+
     if (target.classList.contains('btn-remove-include')) {
       var block = target.closest('.include-block');
-      if (block) { block.remove(); }
+      if (block) {
+        var id = block.getAttribute('data-id');
+        block.remove();
+        // Also remove corresponding excluded fields card
+        var excludedCard = document.querySelector('.excluded-fields-card[data-include-id="' + id + '"]');
+        if (excludedCard) { excludedCard.remove(); }
+      }
       return;
     }
 
@@ -612,16 +969,68 @@ button { cursor: pointer; font: inherit; }
       return;
     }
 
+    if (target.classList.contains('btn-add-excluded-field')) {
+      var includeId = target.getAttribute('data-include-id');
+      var fieldsContainer = document.querySelector('.excluded-fields-container[data-include-id="' + includeId + '"]');
+      if (!fieldsContainer) {
+        // Field might be in include block for legacy support
+        var incBlock = target.closest('.included-block');
+        if (incBlock) {
+          fieldsContainer = incBlock.querySelector('.excluded-fields-container');
+        }
+      }
+      if (fieldsContainer) {
+        var tmp = document.createElement('div');
+        tmp.innerHTML = excludedFieldHtml({ fieldID: '', description: '' });
+        var newField = tmp.firstChild;
+        fieldsContainer.appendChild(newField);
+        var firstFieldField = newField && newField.querySelector ? newField.querySelector('.excluded-field-id') : null;
+        focusAndScroll(firstFieldField);
+      }
+      return;
+    }
+
+    if (target.classList.contains('btn-remove-excluded-field')) {
+      var field = target.closest('.excluded-field-block');
+      if (field) { field.remove(); }
+      return;
+    }
+
+    if (target.classList.contains('btn-remove-reference')) {
+      var row = target.closest('.reference-row');
+      if (row) { row.remove(); }
+      return;
+    }
+
+    if (target.id === 'btn-add-reference') {
+      var referencesContainer = document.getElementById('references-container');
+      var tmpRef = document.createElement('div');
+      tmpRef.innerHTML = referenceHtml('');
+      var newRef = tmpRef.firstChild;
+      referencesContainer.appendChild(newRef);
+      var firstReferenceField = newRef && newRef.querySelector ? newRef.querySelector('.reference-value') : null;
+      focusAndScroll(firstReferenceField);
+      return;
+    }
+
     if (target.id === 'btn-add-include') {
       var container = document.getElementById('includes-container');
       var tmp = document.createElement('div');
       tmp.innerHTML = includeHtml(idCounter++, {
         name: '', path: '', database: '',
         scope: '', allowedPushOperations: '',
-        maxRelativeDepth: '', rules: []
+        maxRelativeDepth: '', rules: [], excludedFields: []
       });
       var newInclude = tmp.firstChild;
       container.appendChild(newInclude);
+      
+      // Also add empty excluded fields card
+      var excludedFieldsContainer = document.getElementById('excluded-fields-container');
+      var tmpExcluded = document.createElement('div');
+      tmpExcluded.innerHTML = excludedFieldsCardHtml(idCounter - 1, []);
+      excludedFieldsContainer.appendChild(tmpExcluded.firstChild);
+      
+      
       var firstIncludeField = newInclude && newInclude.querySelector ? newInclude.querySelector('.inc-name') : null;
       focusAndScroll(firstIncludeField);
       return;
@@ -635,6 +1044,7 @@ button { cursor: pointer; font: inherit; }
   function collectData() {
     var includes = [];
     document.querySelectorAll('.include-block').forEach(function(incEl) {
+      var id = incEl.getAttribute('data-id');
       var rules = [];
       incEl.querySelectorAll('.rule-block').forEach(function(ruleEl) {
         var pushOps = ruleEl.querySelector('.rule-push-ops').value;
@@ -645,6 +1055,19 @@ button { cursor: pointer; font: inherit; }
           allowedPushOperations: pushOps === '__inherited__' ? undefined : pushOps
         });
       });
+      
+      // Collect excluded fields from the separated card
+      var excludedFields = [];
+      var excludedCard = document.querySelector('.excluded-fields-card[data-include-id="' + id + '"]');
+      if (excludedCard) {
+        excludedCard.querySelectorAll('.excluded-field-block').forEach(function(fieldEl) {
+          excludedFields.push({
+            fieldID: fieldEl.querySelector('.excluded-field-id').value.trim(),
+            description: fieldEl.querySelector('.excluded-field-description').value.trim()
+          });
+        });
+      }
+      
       var maxDepthRaw = incEl.querySelector('.inc-max-depth').value.trim();
       var maxDepth = parseInt(maxDepthRaw, 10);
       includes.push({
@@ -654,12 +1077,16 @@ button { cursor: pointer; font: inherit; }
         scope: incEl.querySelector('.inc-scope').value,
         allowedPushOperations: incEl.querySelector('.inc-push-ops').value,
         maxRelativeDepth: maxDepthRaw && !isNaN(maxDepth) ? maxDepth : undefined,
-        rules: rules
+        rules: rules,
+        excludedFields: excludedFields
       });
     });
     return {
       namespace: document.getElementById('namespace').value.trim(),
       description: document.getElementById('description').value.trim(),
+      references: Array.from(document.querySelectorAll('.reference-value'))
+        .map(function(el) { return el.value.trim(); })
+        .filter(function(value) { return value.length > 0; }),
       includes: includes
     };
   }
@@ -672,7 +1099,7 @@ button { cursor: pointer; font: inherit; }
       return;
     }
     var valid = true;
-    document.querySelectorAll('.inc-name, .inc-path, .rule-path').forEach(function(el) {
+    document.querySelectorAll('.inc-name, .inc-path, .rule-path, .excluded-field-id').forEach(function(el) {
       if (!el.value.trim()) { valid = false; el.style.borderColor = 'var(--danger)'; }
       else { el.style.borderColor = ''; }
     });

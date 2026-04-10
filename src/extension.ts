@@ -8,10 +8,12 @@ import { SitecoreTreeItem } from './tree/treeItem';
 import { ExplainPanel } from './explainPanel';
 import { ModulesPanel } from './modulesPanel';
 import { ModuleItemsPanel } from './moduleItemsPanel';
+import { initializePerfOutputIfEnabled, resetPerfOutputFromEnv } from './perfOutput';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
+	initializePerfOutputIfEnabled();
 
 	// Use the console to output diagnostic information (console.log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
@@ -172,7 +174,10 @@ export function activate(context: vscode.ExtensionContext) {
 	// Register commands
 	const refreshTreeCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.refreshTree', async () => {
 		await vscode.commands.executeCommand('workbench.actions.treeView.sitecoreContentTree.collapseAll');
-		treeProvider.refresh({ resetState: true });
+		resetPerfOutputFromEnv();
+		treeProvider.resetFromScratch();
+		updateDatabaseStatus();
+		updateModuleStatus();
 	});
 
 	const selectDatabaseCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.selectDatabase', async () => {

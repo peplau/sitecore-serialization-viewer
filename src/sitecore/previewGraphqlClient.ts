@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { SitecoreItem, SerializationStatus } from '../tree/models';
 import { SerializationConfigService } from './serializationConfigService';
+import { appendPerfLine } from '../perfOutput';
 
 interface GraphqlResponse<T> {
   data?: T;
@@ -37,6 +38,40 @@ export class AuthoringGraphqlClient {
   private baseHeaders: Record<string, string> | undefined;
   private language: string = 'en';
   private database: string = 'master';
+  private cachedAuthToken: string | undefined;
+  private authTokenCacheLoadedAt = 0;
+  private authTokenCacheInitialized = false;
+  private readonly authTokenCacheTtlMs = 30000;
+
+  private async withTiming<T>(operation: string, action: () => PromiseLike<T> | T, traceId?: string, detail?: string): Promise<T> {
+    const startedAt = Date.now();
+
+    const finish = (status: 'ok' | 'error') => {
+      const durationMs = Date.now() - startedAt;
+      const prefix = traceId ? `[${traceId}] ` : '';
+      const suffix = detail ? ` | ${detail}` : '';
+      appendPerfLine(`${prefix}${operation}: ${durationMs.toFixed(1)}ms | ${status}${suffix}`);
+    };
+
+    try {
+      const result = action();
+      if (result && typeof (result as PromiseLike<T>).then === 'function') {
+        return Promise.resolve(result).then(value => {
+          finish('ok');
+          return value;
+        }).catch(error => {
+          finish('error');
+          throw error;
+        });
+      }
+
+      finish('ok');
+      return Promise.resolve(result);
+    } catch (error) {
+      finish('error');
+      return Promise.reject(error);
+    }
+  }
 
   setDatabase(database: string): void {
     this.database = database || 'master';
@@ -51,6 +86,22 @@ export class AuthoringGraphqlClient {
     this.baseHeaders = undefined;
     this.language = 'en';
     this.database = 'master';
+    this.cachedAuthToken = undefined;
+    this.authTokenCacheLoadedAt = 0;
+    this.authTokenCacheInitialized = false;
+  }
+
+  private async getCachedSitecoreAccessToken(): Promise<string | undefined> {
+    const now = Date.now();
+    const isFresh = this.authTokenCacheInitialized && (now - this.authTokenCacheLoadedAt) < this.authTokenCacheTtlMs;
+    if (isFresh) {
+      return this.cachedAuthToken;
+    }
+
+    this.cachedAuthToken = await this.loadSitecoreAccessToken();
+    this.authTokenCacheLoadedAt = now;
+    this.authTokenCacheInitialized = true;
+    return this.cachedAuthToken;
   }
 
   private async buildRequestHeaders(): Promise<Record<string, string>> {
@@ -58,7 +109,7 @@ export class AuthoringGraphqlClient {
       ...(this.baseHeaders ?? { 'Content-Type': 'application/json' })
     };
 
-    const authToken = await this.loadSitecoreAccessToken();
+    const authToken = await this.getCachedSitecoreAccessToken();
     if (!authToken) {
       delete headers.Authorization;
       return headers;
@@ -210,29 +261,39 @@ export class AuthoringGraphqlClient {
     return undefined;
   }
 
-  private async executeQuery<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
-    await this.ensureInitialized();
+  private async executeQuery<T>(query: string, variables?: Record<string, unknown>, traceId?: string): Promise<T> {
+    await this.withTiming('graphql.ensureInitialized', () => this.ensureInitialized(), traceId);
 
     if (!this.endpoint) {
       throw new Error('Authoring GraphQL endpoint not configured. Set sitecoreSerializationViewer.authoringGraphqlUrl or ensure .env.local has SITECORE_EDGE_HOSTNAME.');
     }
 
-    const requestHeaders = await this.buildRequestHeaders();
+    const requestHeaders = await this.withTiming('graphql.buildHeaders', () => this.buildRequestHeaders(), traceId);
 
     console.log(`GraphQL request to: ${this.endpoint}`);
 
-    const resp = await fetch(this.endpoint, {
-      method: 'POST',
-      headers: requestHeaders,
-      body: JSON.stringify({ query, variables })
-    });
+    const requestBody = JSON.stringify({ query, variables });
+    const resp = await this.withTiming(
+      'graphql.fetch',
+      () => fetch(this.endpoint!, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: requestBody
+      }),
+      traceId,
+      `endpoint=${this.endpoint}`
+    );
 
     if (!resp.ok) {
       const body = await resp.text();
       throw new Error(`GraphQL request failed: ${resp.status} ${resp.statusText} - ${body}`);
     }
 
-    const payload = (await resp.json()) as GraphqlResponse<T>;
+    const payload = await this.withTiming(
+      'graphql.parseJson',
+      async () => (await resp.json()) as GraphqlResponse<T>,
+      traceId
+    );
     if (payload.errors && payload.errors.length > 0) {
       const errorMsg = payload.errors.map(e => e.message).join('; ');
       if (errorMsg.toLowerCase().includes('not authorized') || errorMsg.toLowerCase().includes('unauthorized')) {
@@ -301,54 +362,73 @@ export class AuthoringGraphqlClient {
     return data.item ? this.mapItemResult(data.item) : undefined;
   }
 
-  async getChildren(path: string): Promise<SitecoreItem[]> {
+  async getChildren(path: string, traceId?: string): Promise<SitecoreItem[]> {
     const normalizedPath = path || '/sitecore';
     const selectedDatabase = this.database || 'master';
 
     const query = `query ItemChildren($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    children {\n      nodes {\n        itemId\n        name\n        path\n        template { name }\n        children {\n          nodes {\n            itemId\n          }\n        }\n      }\n    }\n  }\n}`;
 
-    const data = await this.executeQuery<ItemChildrenResponse>(query, {
-      path: normalizedPath,
-      database: selectedDatabase
-    });
+    const data = await this.withTiming(
+      'graphql.query.itemChildren',
+      () => this.executeQuery<ItemChildrenResponse>(
+        query,
+        {
+          path: normalizedPath,
+          database: selectedDatabase
+        },
+        traceId
+      ),
+      traceId,
+      `path=${normalizedPath}; database=${selectedDatabase}`
+    );
     const children = data.item?.children?.nodes || [];
 
     console.log(`GraphQL query for ${normalizedPath} (${selectedDatabase}): received ${children.length} children`);
 
-    const items = children
-      .filter(child => child.path !== normalizedPath) // Prevent self-reference
-      .map(child => this.mapItemResult(child));
+    const items = await this.withTiming(
+      'graphql.children.mapResult',
+      () => children
+        .filter(child => child.path !== normalizedPath) // Prevent self-reference
+        .map(child => this.mapItemResult(child)),
+      traceId,
+      `path=${normalizedPath}; count=${children.length}`
+    );
 
     // Sort by sortOrder (ascending), but handle -1 (unsorted) and other values
     // Then by name as tiebreaker
-    return items.sort((a, b) => {
-      const aSort = a.sortOrder ?? -1;
-      const bSort = b.sortOrder ?? -1;
+    return this.withTiming(
+      'graphql.children.sort',
+      () => items.sort((a, b) => {
+        const aSort = a.sortOrder ?? -1;
+        const bSort = b.sortOrder ?? -1;
 
-      // Items with sortOrder -1 should appear based on their displayName or name
-      if (aSort === -1 && bSort === -1) {
+        // Items with sortOrder -1 should appear based on their displayName or name
+        if (aSort === -1 && bSort === -1) {
+          const aDisplay = a.displayName || a.name;
+          const bDisplay = b.displayName || b.name;
+          return aDisplay.localeCompare(bDisplay);
+        }
+
+        // If only one has sortOrder -1, it appears last
+        if (aSort === -1) {
+          return 1;
+        }
+        if (bSort === -1) {
+          return -1;
+        }
+
+        // Both have explicit sort order, use numeric comparison
+        if (aSort !== bSort) {
+          return aSort - bSort;
+        }
+
+        // Same sortOrder, use displayName/name as tiebreaker
         const aDisplay = a.displayName || a.name;
         const bDisplay = b.displayName || b.name;
         return aDisplay.localeCompare(bDisplay);
-      }
-
-      // If only one has sortOrder -1, it appears last
-      if (aSort === -1) {
-        return 1;
-      }
-      if (bSort === -1) {
-        return -1;
-      }
-
-      // Both have explicit sort order, use numeric comparison
-      if (aSort !== bSort) {
-        return aSort - bSort;
-      }
-
-      // Same sortOrder, use displayName/name as tiebreaker
-      const aDisplay = a.displayName || a.name;
-      const bDisplay = b.displayName || b.name;
-      return aDisplay.localeCompare(bDisplay);
-    });
+      }),
+      traceId,
+      `path=${normalizedPath}; count=${items.length}`
+    );
   }
 }

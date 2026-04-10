@@ -7,6 +7,7 @@ import { SitecoreTreeItem } from './treeItem';
 import { SitecoreItem, SerializationStatus } from './models';
 import { AuthoringGraphqlClient } from '../sitecore/previewGraphqlClient';
 import { SerializationConfigService } from '../sitecore/serializationConfigService';
+import { appendPerfLine, isPerfTracingEnabled, showPerfOutput } from '../perfOutput';
 
 interface ModuleSerializationInclude {
   name?: string;
@@ -100,12 +101,79 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private availableModulesCache: string[] | undefined;
   private moduleSerializationSourceCache: Map<string, ModuleSerializationSource | null> = new Map();
   private moduleItemsListingCache: Map<string, ModuleItemsCacheEntry> = new Map();
+  private readonly perfStats: Map<string, { count: number; totalMs: number; minMs: number; maxMs: number; lastMs: number }> = new Map();
+  private expansionTraceCounter = 0;
+  private reconcileInFlightByPath: Map<string, Promise<void>> = new Map();
 
   constructor() {
     this.client = new AuthoringGraphqlClient();
     const config = vscode.workspace.getConfiguration('sitecoreSerializationViewer');
     this.selectedDatabase = config.get<string>('defaultDatabase') || 'master';
     this.client.setDatabase(this.selectedDatabase);
+  }
+
+  private withTiming<T>(operation: string, action: () => PromiseLike<T> | T, traceId?: string, extra?: string): Promise<T> {
+    const startedAt = Date.now();
+
+    const finalize = (status: 'ok' | 'error') => {
+      const durationMs = Date.now() - startedAt;
+      this.recordPerf(operation, durationMs, traceId, `${status}${extra ? ` | ${extra}` : ''}`);
+    };
+
+    try {
+      const result = action();
+      if (result && typeof (result as PromiseLike<T>).then === 'function') {
+        return Promise.resolve(result).then(value => {
+          finalize('ok');
+          return value;
+        }).catch(error => {
+          finalize('error');
+          throw error;
+        });
+      }
+
+      finalize('ok');
+      return Promise.resolve(result);
+    } catch (error) {
+      finalize('error');
+      return Promise.reject(error);
+    }
+  }
+
+  private recordPerf(operation: string, durationMs: number, traceId?: string, detail?: string): void {
+    if (!isPerfTracingEnabled()) {
+      return;
+    }
+
+    const existing = this.perfStats.get(operation);
+    if (!existing) {
+      this.perfStats.set(operation, {
+        count: 1,
+        totalMs: durationMs,
+        minMs: durationMs,
+        maxMs: durationMs,
+        lastMs: durationMs
+      });
+    } else {
+      existing.count += 1;
+      existing.totalMs += durationMs;
+      existing.minMs = Math.min(existing.minMs, durationMs);
+      existing.maxMs = Math.max(existing.maxMs, durationMs);
+      existing.lastMs = durationMs;
+    }
+
+    const stats = this.perfStats.get(operation)!;
+    const averageMs = stats.totalMs / stats.count;
+    const prefix = traceId ? `[${traceId}] ` : '';
+    const suffix = detail ? ` | ${detail}` : '';
+    appendPerfLine(
+      `${prefix}${operation}: ${durationMs.toFixed(1)}ms (avg ${averageMs.toFixed(1)}ms over ${stats.count}, min ${stats.minMs.toFixed(1)}ms, max ${stats.maxMs.toFixed(1)}ms)${suffix}`
+    );
+  }
+
+  private nextTraceId(basePath: string): string {
+    this.expansionTraceCounter += 1;
+    return `expand-${this.expansionTraceCounter}-${basePath}`;
   }
 
   getSelectedDatabase(): string {
@@ -674,16 +742,26 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     });
   }
 
-  private async getRawChildren(basePath: string, requestGeneration: number): Promise<SitecoreItem[]> {
+  private async getRawChildren(basePath: string, requestGeneration: number, traceId?: string): Promise<SitecoreItem[]> {
     if (this.cache.has(basePath)) {
+      this.recordPerf('tree.rawChildren.cacheHit', 0, traceId, `path=${basePath}`);
       return this.cache.get(basePath) || [];
     }
 
     let items: SitecoreItem[] = [];
     try {
-      const result = await this.client.getChildren(basePath);
-      items = (result || []).filter((item: SitecoreItem) => item.path !== basePath);
-      items = await this.reconcileIndirectStatuses(items);
+      const result = await this.withTiming(
+        'tree.graphql.getChildren.total',
+        () => this.client.getChildren(basePath, traceId),
+        traceId,
+        `path=${basePath}`
+      );
+      items = await this.withTiming(
+        'tree.children.filterSelfReference',
+        () => (result || []).filter((item: SitecoreItem) => item.path !== basePath),
+        traceId,
+        `path=${basePath}; input=${result?.length ?? 0}`
+      );
 
       if (requestGeneration !== this.loadGeneration) {
         return [];
@@ -698,7 +776,64 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     }
 
     this.cache.set(basePath, items);
+    this.recordPerf('tree.rawChildren.cacheStore', 0, traceId, `path=${basePath}; count=${items.length}`);
+    this.startBackgroundReconcile(basePath, items, requestGeneration, traceId);
     return items;
+  }
+
+  private startBackgroundReconcile(basePath: string, items: SitecoreItem[], requestGeneration: number, traceId?: string): void {
+    const hasCandidates = items.some(item => item.status === SerializationStatus.Indirect || item.status === SerializationStatus.Untracked);
+    if (!hasCandidates) {
+      return;
+    }
+
+    if (this.reconcileInFlightByPath.has(basePath)) {
+      this.recordPerf('tree.children.reconcileStatuses.background.skippedInFlight', 0, traceId, `path=${basePath}`);
+      return;
+    }
+
+    const reconcilePromise = (async () => {
+      const reconciled = await this.withTiming(
+        'tree.children.reconcileStatuses.background',
+        () => this.reconcileIndirectStatuses(items, traceId),
+        traceId,
+        `path=${basePath}; count=${items.length}`
+      );
+
+      if (requestGeneration !== this.loadGeneration) {
+        this.recordPerf('tree.children.reconcileStatuses.background.discardedGeneration', 0, traceId, `path=${basePath}`);
+        return;
+      }
+
+      const current = this.cache.get(basePath);
+      if (!current || current.length !== reconciled.length) {
+        return;
+      }
+
+      let changed = false;
+      for (let i = 0; i < current.length; i++) {
+        if (current[i].status !== reconciled[i].status) {
+          changed = true;
+          break;
+        }
+      }
+
+      if (!changed) {
+        this.recordPerf('tree.children.reconcileStatuses.background.noChanges', 0, traceId, `path=${basePath}`);
+        return;
+      }
+
+      this.cache.set(basePath, reconciled);
+      this.recordPerf('tree.children.reconcileStatuses.background.applied', 0, traceId, `path=${basePath}`);
+      this._onDidChangeTreeData.fire();
+    })().catch(error => {
+      console.warn(`Background reconcile failed for path ${basePath}:`, error);
+      this.recordPerf('tree.children.reconcileStatuses.background.error', 0, traceId, `path=${basePath}`);
+    });
+
+    this.reconcileInFlightByPath.set(basePath, reconcilePromise.finally(() => {
+      this.reconcileInFlightByPath.delete(basePath);
+    }));
   }
 
   private normalizePath(pathValue: string): string {
@@ -1148,7 +1283,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return [source.rootUri];
   }
 
-  private async ensureModuleYamlTreeLoaded(requestGeneration: number): Promise<void> {
+  private async ensureModuleYamlTreeLoaded(requestGeneration: number, traceId?: string): Promise<void> {
     if (!this.isModuleFilterActive()) {
       return;
     }
@@ -1178,7 +1313,12 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       }
 
       const yamlPattern = new vscode.RelativePattern(rootDir, 'items/**/*.{yml,yaml}');
-      const yamlUris = await vscode.workspace.findFiles(yamlPattern);
+      const yamlUris = await this.withTiming(
+        'moduleYaml.findFiles',
+        () => vscode.workspace.findFiles(yamlPattern),
+        traceId,
+        `root=${rootDir.fsPath}`
+      );
 
       for (const yamlUri of yamlUris) {
         if (requestGeneration !== this.loadGeneration) {
@@ -1187,7 +1327,12 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
         let content = '';
         try {
-          const bytes = await vscode.workspace.fs.readFile(yamlUri);
+          const bytes = await this.withTiming(
+            'moduleYaml.readFile',
+            () => vscode.workspace.fs.readFile(yamlUri),
+            traceId,
+            `file=${yamlUri.fsPath}`
+          );
           content = Buffer.from(bytes).toString('utf8');
         } catch {
           continue;
@@ -1257,9 +1402,14 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this.moduleYamlLoadedFor = modeKey;
   }
 
-  private async buildDisplayedChildren(basePath: string, requestGeneration: number, displayedParentPath: string): Promise<SitecoreItem[]> {
+  private async buildDisplayedChildren(basePath: string, requestGeneration: number, displayedParentPath: string, traceId?: string): Promise<SitecoreItem[]> {
     if (this.isModuleFilterActive()) {
-      await this.ensureModuleYamlTreeLoaded(requestGeneration);
+      await this.withTiming(
+        'tree.moduleYaml.ensureLoaded',
+        () => this.ensureModuleYamlTreeLoaded(requestGeneration, traceId),
+        traceId,
+        `basePath=${basePath}`
+      );
       const children = this.moduleYamlChildrenByPath.get(basePath) || [];
       for (const item of children) {
         this.parentPathByPath.set(item.path, displayedParentPath);
@@ -1267,7 +1417,12 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       return children;
     }
 
-    const rawChildren = await this.getRawChildren(basePath, requestGeneration);
+    const rawChildren = await this.withTiming(
+      'tree.rawChildren.total',
+      () => this.getRawChildren(basePath, requestGeneration, traceId),
+      traceId,
+      `basePath=${basePath}`
+    );
     for (const item of rawChildren) {
       this.parentPathByPath.set(item.path, displayedParentPath);
     }
@@ -1321,7 +1476,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     // If no element, return roots depending on active module filter mode.
     if (!element) {
       if (this.isModuleFilterActive()) {
-        await this.ensureModuleYamlTreeLoaded(requestGeneration);
+        await this.withTiming('tree.root.moduleYaml.ensureLoaded', () => this.ensureModuleYamlTreeLoaded(requestGeneration));
         return this.moduleYamlRoots.map(item => this.createModuleRootDisplayItem(item));
       }
 
@@ -1337,9 +1492,35 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     }
 
     const basePath = element.item.path;
+    const traceId = this.nextTraceId(basePath);
+    showPerfOutput(true);
+    appendPerfLine(`[${traceId}] expand.request path=${basePath}; database=${this.selectedDatabase}; module=${this.selectedModule}`);
 
-    const displayedItems = await this.buildDisplayedChildren(basePath, requestGeneration, basePath);
-    return displayedItems.map(item => this.createTreeItem(item));
+    return this.withTiming('tree.expand.total', async () => {
+      const displayedItems = await this.withTiming(
+        'tree.buildDisplayedChildren.total',
+        () => this.buildDisplayedChildren(basePath, requestGeneration, basePath, traceId),
+        traceId,
+        `path=${basePath}`
+      );
+
+      const treeItems = await this.withTiming(
+        'tree.createTreeItems',
+        () => displayedItems.map(item => this.createTreeItem(item)),
+        traceId,
+        `count=${displayedItems.length}`
+      );
+
+      appendPerfLine(`[${traceId}] expand.result path=${basePath}; children=${treeItems.length}`);
+      return treeItems;
+    }, traceId, `path=${basePath}`);
+  }
+
+  resetFromScratch(): void {
+    const config = vscode.workspace.getConfiguration('sitecoreSerializationViewer');
+    this.selectedDatabase = config.get<string>('defaultDatabase') || 'master';
+    this.selectedModule = 'All modules';
+    this.refresh({ resetState: true });
   }
 
   refresh(options?: { resetState?: boolean }): void {
@@ -1352,6 +1533,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this.parentPathByPath.clear();
     this.explainStatusCache.clear();
     this.moduleItemsListingCache.clear();
+    this.reconcileInFlightByPath.clear();
 
     if (options?.resetState) {
       this.loadGeneration += 1;
@@ -1364,8 +1546,9 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this._onDidChangeTreeData.fire();
   }
 
-  private async reconcileIndirectStatuses(items: SitecoreItem[]): Promise<SitecoreItem[]> {
+  private async reconcileIndirectStatuses(items: SitecoreItem[], traceId?: string): Promise<SitecoreItem[]> {
     const updated = [...items];
+    const candidates: Array<{ index: number; item: SitecoreItem }> = [];
 
     for (let i = 0; i < updated.length; i++) {
       const item = updated[i];
@@ -1375,14 +1558,44 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         continue;
       }
 
-      const resolvedStatus = await this.getExplainBasedStatus(item.path);
-      if (resolvedStatus && resolvedStatus !== item.status) {
-        updated[i] = {
-          ...item,
-          status: resolvedStatus
-        };
-      }
+      candidates.push({ index: i, item });
     }
+
+    const explainCalls = candidates.length;
+    this.recordPerf('tree.explain.resolveStatus.calls', 0, traceId, `calls=${explainCalls}`);
+
+    if (candidates.length === 0) {
+      return updated;
+    }
+
+    const maxConcurrency = Math.min(3, candidates.length);
+    let nextCandidate = 0;
+
+    await this.withTiming('tree.explain.resolveStatus.parallelBatch', async () => {
+      const workers = Array.from({ length: maxConcurrency }, async () => {
+        while (nextCandidate < candidates.length) {
+          const currentIndex = nextCandidate;
+          nextCandidate += 1;
+          const candidate = candidates[currentIndex];
+
+          const resolvedStatus = await this.withTiming(
+            'tree.explain.resolveStatus',
+            () => this.getExplainBasedStatus(candidate.item.path),
+            traceId,
+            `path=${candidate.item.path}`
+          );
+
+          if (resolvedStatus && resolvedStatus !== candidate.item.status) {
+            updated[candidate.index] = {
+              ...candidate.item,
+              status: resolvedStatus
+            };
+          }
+        }
+      });
+
+      await Promise.all(workers);
+    }, traceId, `calls=${candidates.length}; concurrency=${maxConcurrency}`);
 
     return updated;
   }

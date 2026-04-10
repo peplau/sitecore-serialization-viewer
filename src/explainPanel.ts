@@ -143,7 +143,20 @@ p { margin: 0 0 0.8rem; }
 			status = 'Serialized (Indirectly)';
 			isSerialized = true;
 		}
-		if (lines.some(line => /not included/i.test(line))) {
+
+		// Let the explain output be authoritative.
+		// "is included!" is a definitive positive signal; "not included" is a definitive negative signal.
+		// Positive wins when both appear (shouldn't happen, but be safe).
+		const explainSaysIncluded = lines.some(line => /\bis included[.!]?/i.test(line));
+		const explainSaysNotIncluded = lines.some(line => /not included/i.test(line));
+
+		if (explainSaysIncluded) {
+			isSerialized = true;
+			if (!status.startsWith('Serialized')) {
+				const isDirect = lines.some(line => /item path matches subtree scope/i.test(line));
+				status = isDirect ? 'Serialized (Directly)' : 'Serialized (Indirectly)';
+			}
+		} else if (explainSaysNotIncluded) {
 			status = 'Not serialized';
 			isSerialized = false;
 		}

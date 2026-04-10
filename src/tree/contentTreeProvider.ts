@@ -1369,7 +1369,9 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
     for (let i = 0; i < updated.length; i++) {
       const item = updated[i];
-      if (item.status !== SerializationStatus.Indirect) {
+      // Reconcile both Indirect items (may need downgrade) and Untracked items
+      // (may have been missed by the embedded config but are included by a live module JSON).
+      if (item.status !== SerializationStatus.Indirect && item.status !== SerializationStatus.Untracked) {
         continue;
       }
 
@@ -1400,15 +1402,23 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
     try {
       const { stdout, stderr } = await this.exec(command, { cwd: workspaceRoot, timeout: 10000 });
-      const text = `${stdout || ''}\n${stderr || ''}`.toLowerCase();
+      const text = `${stdout || ''}\n${stderr || ''}`;
+      const textLower = text.toLowerCase();
 
-      if (/not included in any module configuration|\snot included[.!]?/i.test(text)) {
+      if (/not included in any module configuration|\bnot included[.!]?/i.test(textLower)) {
         this.explainStatusCache.set(itemPath, SerializationStatus.NotSerialized);
         return SerializationStatus.NotSerialized;
       }
 
-      this.explainStatusCache.set(itemPath, SerializationStatus.Indirect);
-      return SerializationStatus.Indirect;
+      if (/\bis included[.!]?/i.test(text)) {
+        const isDirect = /item path matches subtree scope/i.test(text);
+        const resolvedStatus = isDirect ? SerializationStatus.Direct : SerializationStatus.Indirect;
+        this.explainStatusCache.set(itemPath, resolvedStatus);
+        return resolvedStatus;
+      }
+
+      // No definitive signal — keep original status.
+      return undefined;
     } catch {
       // Keep original status if explain cannot run.
       return undefined;

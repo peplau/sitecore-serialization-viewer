@@ -80,6 +80,12 @@ interface ModuleItemsCacheEntry {
   data: ModuleItemsListingData;
 }
 
+interface CachedYamlMetadata {
+  path?: string;
+  name?: string;
+  id?: string;
+}
+
 export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<SitecoreTreeItem | undefined | void> = new vscode.EventEmitter<SitecoreTreeItem | undefined | void>();
   readonly onDidChangeTreeData: vscode.Event<SitecoreTreeItem | undefined | void> = this._onDidChangeTreeData.event;
@@ -101,8 +107,10 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private availableModulesCache: string[] | undefined;
   private moduleSerializationSourceCache: Map<string, ModuleSerializationSource | null> = new Map();
   private moduleItemsListingCache: Map<string, ModuleItemsCacheEntry> = new Map();
+  private moduleItemsYamlMetadataCache: Map<string, CachedYamlMetadata> = new Map();
   private readonly perfStats: Map<string, { count: number; totalMs: number; minMs: number; maxMs: number; lastMs: number }> = new Map();
   private expansionTraceCounter = 0;
+  private moduleItemsTraceCounter = 0;
   private reconcileInFlightByPath: Map<string, Promise<void>> = new Map();
 
   constructor() {
@@ -176,6 +184,11 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return `expand-${this.expansionTraceCounter}-${basePath}`;
   }
 
+  private nextModuleItemsTraceId(moduleJsonPath: string): string {
+    this.moduleItemsTraceCounter += 1;
+    return `items-${this.moduleItemsTraceCounter}-${path.basename(moduleJsonPath)}`;
+  }
+
   getSelectedDatabase(): string {
     return this.selectedDatabase;
   }
@@ -216,8 +229,17 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   }
 
   async getModuleItemsListingByJsonPath(jsonFilePath: string): Promise<ModuleItemsListingData | undefined> {
-    const jsonUri = await this.resolveModuleJsonUri(jsonFilePath);
+    const traceId = this.nextModuleItemsTraceId(jsonFilePath);
+    appendPerfLine(`[${traceId}] items.request jsonPath=${jsonFilePath}; selectedDatabase=${this.selectedDatabase}`);
+
+    const jsonUri = await this.withTiming(
+      'items.resolveModuleJsonUri',
+      () => this.resolveModuleJsonUri(jsonFilePath),
+      traceId,
+      `jsonPath=${jsonFilePath}`
+    );
     if (!jsonUri) {
+      appendPerfLine(`[${traceId}] items.result unresolvedJsonPath=${jsonFilePath}`);
       return undefined;
     }
 
@@ -232,31 +254,41 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     };
 
     try {
-      jsonBytes = await vscode.workspace.fs.readFile(jsonUri);
-      moduleJson = JSON.parse(Buffer.from(jsonBytes).toString('utf8')) as {
+      jsonBytes = await this.withTiming(
+        'items.readModuleJson',
+        () => vscode.workspace.fs.readFile(jsonUri),
+        traceId,
+        `json=${jsonUri.fsPath}`
+      );
+      moduleJson = await this.withTiming('items.parseModuleJson', () => JSON.parse(Buffer.from(jsonBytes).toString('utf8')) as {
         namespace?: string;
         description?: string;
         references?: string[];
         roles?: ModulePrincipalPredicate[];
         users?: ModulePrincipalPredicate[];
         items?: { includes?: ModuleSerializationInclude[] };
-      };
+      }, traceId, `json=${jsonUri.fsPath}`);
     } catch {
+      appendPerfLine(`[${traceId}] items.result invalidJson=${jsonUri.fsPath}`);
       return undefined;
     }
 
     const jsonPathKey = jsonUri.fsPath.toLowerCase();
-    const jsonMd5 = this.computeMd5(jsonBytes);
+    const jsonMd5 = await this.withTiming('items.computeJsonMd5', () => this.computeMd5(jsonBytes), traceId);
     const cachedEntry = this.moduleItemsListingCache.get(jsonPathKey);
     if (cachedEntry && cachedEntry.md5 === jsonMd5) {
+      this.recordPerf('items.cache.hit', 0, traceId, `json=${jsonUri.fsPath}`);
+      appendPerfLine(`[${traceId}] items.result cacheHit json=${jsonUri.fsPath}`);
       return cachedEntry.data;
     }
+    this.recordPerf('items.cache.miss', 0, traceId, `json=${jsonUri.fsPath}`);
 
     const includes = Array.isArray(moduleJson.items?.includes)
       ? moduleJson.items.includes.filter(include => typeof include?.path === 'string' && include.path.trim().length > 0)
       : [];
     const moduleName = moduleJson.namespace?.trim();
     if (!moduleName || includes.length === 0) {
+      appendPerfLine(`[${traceId}] items.result noIncludesOrModule json=${jsonUri.fsPath}`);
       return undefined;
     }
 
@@ -273,82 +305,168 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     };
 
     const itemYamlPattern = new vscode.RelativePattern(source.rootUri, 'items/**/*.{yml,yaml}');
-    const itemYamlUris = await vscode.workspace.findFiles(itemYamlPattern);
+    const itemYamlUris = await this.withTiming(
+      'items.findItemYamlFiles',
+      () => vscode.workspace.findFiles(itemYamlPattern),
+      traceId,
+      `root=${source.rootUri.fsPath}`
+    );
     const contentYamlUris: vscode.Uri[] = [];
     const roleYamlUris: vscode.Uri[] = [];
     const userYamlUris: vscode.Uri[] = [];
 
-    for (const yamlUri of itemYamlUris) {
-      const relativeYamlPath = path.relative(source.rootUri.fsPath, yamlUri.fsPath).replace(/\\/g, '/').toLowerCase();
-      if (this.isPrincipalSerializationPath(relativeYamlPath, 'Role')) {
-        roleYamlUris.push(yamlUri);
-        continue;
-      }
+    await this.withTiming('items.classifyYamlFiles', () => {
+      for (const yamlUri of itemYamlUris) {
+        const relativeYamlPath = path.relative(source.rootUri.fsPath, yamlUri.fsPath).replace(/\\/g, '/').toLowerCase();
+        if (this.isPrincipalSerializationPath(relativeYamlPath, 'Role')) {
+          roleYamlUris.push(yamlUri);
+          continue;
+        }
 
-      if (this.isPrincipalSerializationPath(relativeYamlPath, 'User')) {
-        userYamlUris.push(yamlUri);
-        continue;
-      }
+        if (this.isPrincipalSerializationPath(relativeYamlPath, 'User')) {
+          userYamlUris.push(yamlUri);
+          continue;
+        }
 
-      contentYamlUris.push(yamlUri);
-    }
+        contentYamlUris.push(yamlUri);
+      }
+    }, traceId, `total=${itemYamlUris.length}`);
+    this.recordPerf(
+      'items.classifyYamlFiles.counts',
+      0,
+      traceId,
+      `total=${itemYamlUris.length}; content=${contentYamlUris.length}; roles=${roleYamlUris.length}; users=${userYamlUris.length}`
+    );
 
     const rowsByPathByDatabase = {
       master: new Map<string, ModuleItemsListRow>(),
       core: new Map<string, ModuleItemsListRow>()
     };
 
-    for (const yamlUri of contentYamlUris) {
-      let content = '';
-      try {
-        const bytes = await vscode.workspace.fs.readFile(yamlUri);
-        content = Buffer.from(bytes).toString('utf8');
-      } catch {
-        continue;
+    await this.withTiming('items.processContentYamlFiles.total', async () => {
+      interface PendingRow {
+        database: 'master' | 'core';
+        normalizedPath: string;
+        row: ModuleItemsListRow;
       }
 
-      const parsed = this.parseYamlMetadata(content);
-      if (!parsed.path) {
-        continue;
-      }
+      let readMsTotal = 0;
+      let parseMsTotal = 0;
+      let matchMsTotal = 0;
+      let mergeMsTotal = 0;
+      let matchedYamlCount = 0;
+      const pendingRows: PendingRow[] = [];
+      const maxConcurrency = Math.min(16, Math.max(1, contentYamlUris.length));
+      let nextIndex = 0;
 
-      const matches = this.getModulePathMatchesByDatabase(parsed.path, source.pathConfigs);
-      if (matches.length === 0) {
-        continue;
-      }
+      const workers = Array.from({ length: maxConcurrency }, async () => {
+        while (nextIndex < contentYamlUris.length) {
+          const localIndex = nextIndex;
+          nextIndex += 1;
+          const yamlUri = contentYamlUris[localIndex];
+          const metadataCacheKey = yamlUri.fsPath.toLowerCase();
+          let parsed = this.moduleItemsYamlMetadataCache.get(metadataCacheKey);
+          if (!parsed) {
+            let content = '';
 
-      for (const entry of matches) {
-        const rowsByPath = entry.database === 'core'
+            try {
+              const readStartedAt = Date.now();
+              const bytes = await vscode.workspace.fs.readFile(yamlUri);
+              readMsTotal += Date.now() - readStartedAt;
+              content = Buffer.from(bytes).toString('utf8');
+            } catch {
+              continue;
+            }
+
+            const parseStartedAt = Date.now();
+            parsed = this.parseYamlMetadata(content);
+            parseMsTotal += Date.now() - parseStartedAt;
+            this.moduleItemsYamlMetadataCache.set(metadataCacheKey, parsed);
+          }
+
+          if (!parsed.path) {
+            continue;
+          }
+
+          const matchStartedAt = Date.now();
+          const matches = this.getModulePathMatchesByDatabase(parsed.path, source.pathConfigs);
+          matchMsTotal += Date.now() - matchStartedAt;
+          if (matches.length === 0) {
+            continue;
+          }
+
+          matchedYamlCount += 1;
+          const mergeStartedAt = Date.now();
+          const normalizedPath = this.normalizePath(parsed.path);
+          for (const entry of matches) {
+            const nextStatus: 'Serialized directly' | 'Serialized indirectly' =
+              entry.match.status === SerializationStatus.Direct ? 'Serialized directly' : 'Serialized indirectly';
+            pendingRows.push({
+              database: entry.database,
+              normalizedPath,
+              row: {
+                itemPath: normalizedPath,
+                status: nextStatus,
+                includeOrRule: this.getIncludeOrRuleLabel(entry.match.config),
+                yamlPath: yamlUri.fsPath,
+                itemId: parsed.id
+              }
+            });
+          }
+          mergeMsTotal += Date.now() - mergeStartedAt;
+        }
+      });
+
+      await Promise.all(workers);
+
+      for (const pending of pendingRows) {
+        const rowsByPath = pending.database === 'core'
           ? rowsByPathByDatabase.core
           : rowsByPathByDatabase.master;
-        const normalizedPath = this.normalizePath(parsed.path);
-        const current = rowsByPath.get(normalizedPath);
-        const nextStatus: 'Serialized directly' | 'Serialized indirectly' =
-          entry.match.status === SerializationStatus.Direct ? 'Serialized directly' : 'Serialized indirectly';
-        const nextRow: ModuleItemsListRow = {
-          itemPath: normalizedPath,
-          status: nextStatus,
-          includeOrRule: this.getIncludeOrRuleLabel(entry.match.config),
-          yamlPath: yamlUri.fsPath,
-          itemId: parsed.id
-        };
-
+        const current = rowsByPath.get(pending.normalizedPath);
         if (!current) {
-          rowsByPath.set(normalizedPath, nextRow);
+          rowsByPath.set(pending.normalizedPath, pending.row);
           continue;
         }
 
-        if (current.status === 'Serialized indirectly' && nextRow.status === 'Serialized directly') {
-          rowsByPath.set(normalizedPath, nextRow);
+        if (current.status === 'Serialized indirectly' && pending.row.status === 'Serialized directly') {
+          rowsByPath.set(pending.normalizedPath, pending.row);
         }
       }
-    }
 
-    const roleItems = await this.buildPrincipalRows(roleYamlUris, source.rootUri, source.roles, 'Role');
-    const userItems = await this.buildPrincipalRows(userYamlUris, source.rootUri, source.users, 'User');
+      this.recordPerf('items.processContentYamlFiles.parallelism', 0, traceId, `files=${contentYamlUris.length}; concurrency=${maxConcurrency}`);
+      this.recordPerf('items.processContentYamlFiles.metadataCacheSize', 0, traceId, `entries=${this.moduleItemsYamlMetadataCache.size}`);
+      this.recordPerf('items.processContentYamlFiles.read', readMsTotal, traceId, `files=${contentYamlUris.length}`);
+      this.recordPerf('items.processContentYamlFiles.parse', parseMsTotal, traceId, `files=${contentYamlUris.length}`);
+      this.recordPerf('items.processContentYamlFiles.match', matchMsTotal, traceId, `files=${contentYamlUris.length}`);
+      this.recordPerf('items.processContentYamlFiles.merge', mergeMsTotal, traceId, `matchedFiles=${matchedYamlCount}`);
+    }, traceId, `files=${contentYamlUris.length}`);
 
-    const masterItems = Array.from(rowsByPathByDatabase.master.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
-    const coreItems = Array.from(rowsByPathByDatabase.core.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
+    const roleItems = await this.withTiming(
+      'items.buildRoleRows',
+      () => this.buildPrincipalRows(roleYamlUris, source.rootUri, source.roles, 'Role', traceId),
+      traceId,
+      `files=${roleYamlUris.length}`
+    );
+    const userItems = await this.withTiming(
+      'items.buildUserRows',
+      () => this.buildPrincipalRows(userYamlUris, source.rootUri, source.users, 'User', traceId),
+      traceId,
+      `files=${userYamlUris.length}`
+    );
+
+    const masterItems = await this.withTiming(
+      'items.sortMasterRows',
+      () => Array.from(rowsByPathByDatabase.master.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath)),
+      traceId,
+      `count=${rowsByPathByDatabase.master.size}`
+    );
+    const coreItems = await this.withTiming(
+      'items.sortCoreRows',
+      () => Array.from(rowsByPathByDatabase.core.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath)),
+      traceId,
+      `count=${rowsByPathByDatabase.core.size}`
+    );
 
     const listingData: ModuleItemsListingData = {
       moduleName: source.moduleName,
@@ -360,10 +478,16 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       userItems
     };
 
-    this.moduleItemsListingCache.set(jsonPathKey, {
-      md5: jsonMd5,
-      data: listingData
-    });
+    await this.withTiming('items.cacheStore', () => {
+      this.moduleItemsListingCache.set(jsonPathKey, {
+        md5: jsonMd5,
+        data: listingData
+      });
+    }, traceId, `json=${jsonUri.fsPath}`);
+
+    appendPerfLine(
+      `[${traceId}] items.result module=${listingData.moduleName}; master=${listingData.masterItems.length}; core=${listingData.coreItems.length}; roles=${listingData.roleItems.length}; users=${listingData.userItems.length}`
+    );
 
     return listingData;
   }
@@ -403,22 +527,33 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     yamlUris: vscode.Uri[],
     rootUri: vscode.Uri,
     predicates: ModulePrincipalPredicate[],
-    principalType: 'Role' | 'User'
+    principalType: 'Role' | 'User',
+    traceId?: string
   ): Promise<ModuleItemsListRow[]> {
     const rowsByPrincipal = new Map<string, ModuleItemsListRow>();
+    let readMsTotal = 0;
+    let parseMsTotal = 0;
+    let deriveMsTotal = 0;
 
     for (const yamlUri of yamlUris) {
       let content = '';
       try {
+        const readStartedAt = Date.now();
         const bytes = await vscode.workspace.fs.readFile(yamlUri);
+        readMsTotal += Date.now() - readStartedAt;
         content = Buffer.from(bytes).toString('utf8');
       } catch {
         continue;
       }
 
+      const parseStartedAt = Date.now();
       const parsed = this.parsePrincipalYamlMetadata(content, principalType);
+      parseMsTotal += Date.now() - parseStartedAt;
+
+      const deriveStartedAt = Date.now();
       const relativeYamlPath = path.relative(rootUri.fsPath, yamlUri.fsPath).replace(/\\/g, '/');
       const principal = parsed.principal || this.derivePrincipalFromRelativePath(relativeYamlPath, principalType);
+      deriveMsTotal += Date.now() - deriveStartedAt;
       if (!principal) {
         continue;
       }
@@ -438,6 +573,10 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         rowsByPrincipal.set(normalizedPrincipal, nextRow);
       }
     }
+
+    this.recordPerf(`items.principals.${principalType.toLowerCase()}.read`, readMsTotal, traceId, `files=${yamlUris.length}`);
+    this.recordPerf(`items.principals.${principalType.toLowerCase()}.parse`, parseMsTotal, traceId, `files=${yamlUris.length}`);
+    this.recordPerf(`items.principals.${principalType.toLowerCase()}.derive`, deriveMsTotal, traceId, `files=${yamlUris.length}`);
 
     return Array.from(rowsByPrincipal.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
   }
@@ -1533,6 +1672,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this.parentPathByPath.clear();
     this.explainStatusCache.clear();
     this.moduleItemsListingCache.clear();
+    this.moduleItemsYamlMetadataCache.clear();
     this.reconcileInFlightByPath.clear();
 
     if (options?.resetState) {

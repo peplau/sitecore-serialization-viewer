@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { exec as execCallback } from 'child_process';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import { promisify } from 'util';
 import { SitecoreTreeItem } from './treeItem';
 import { SitecoreItem, SerializationStatus } from './models';
@@ -20,10 +21,17 @@ interface ModuleSerializationSource {
   moduleName: string;
   description?: string;
   references?: string[];
+  roles: ModulePrincipalPredicate[];
+  users: ModulePrincipalPredicate[];
   jsonUri: vscode.Uri;
   rootUri: vscode.Uri;
   includes: ModuleSerializationInclude[];
   pathConfigs: ModuleSerializationPathConfig[];
+}
+
+interface ModulePrincipalPredicate {
+  domain?: string;
+  pattern?: string;
 }
 
 export interface ModuleListingItem {
@@ -48,6 +56,29 @@ interface ModulePathMatch {
   status: SerializationStatus;
 }
 
+interface ModuleItemsListRow {
+  itemPath: string;
+  status: 'Serialized directly' | 'Serialized indirectly';
+  includeOrRule: string;
+  yamlPath: string;
+  itemId?: string;
+}
+
+interface ModuleItemsListingData {
+  moduleName: string;
+  description?: string;
+  references?: string[];
+  masterItems: ModuleItemsListRow[];
+  coreItems: ModuleItemsListRow[];
+  roleItems: ModuleItemsListRow[];
+  userItems: ModuleItemsListRow[];
+}
+
+interface ModuleItemsCacheEntry {
+  md5: string;
+  data: ModuleItemsListingData;
+}
+
 export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<SitecoreTreeItem | undefined | void> = new vscode.EventEmitter<SitecoreTreeItem | undefined | void>();
   readonly onDidChangeTreeData: vscode.Event<SitecoreTreeItem | undefined | void> = this._onDidChangeTreeData.event;
@@ -68,6 +99,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private moduleYamlLoadedFor: string | undefined;
   private availableModulesCache: string[] | undefined;
   private moduleSerializationSourceCache: Map<string, ModuleSerializationSource | null> = new Map();
+  private moduleItemsListingCache: Map<string, ModuleItemsCacheEntry> = new Map();
 
   constructor() {
     this.client = new AuthoringGraphqlClient();
@@ -115,47 +147,90 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       .sort((a, b) => a.namespace.localeCompare(b.namespace));
   }
 
-  async getModuleItemsListingByJsonPath(jsonFilePath: string): Promise<{
-    moduleName: string;
-    description?: string;
-    references?: string[];
-    items: Array<{
-      itemPath: string;
-      status: 'Serialized directly' | 'Serialized indirectly';
-      includeOrRule: string;
-      yamlPath: string;
-      itemId?: string;
-    }>;
-  } | undefined> {
-    const sources = await this.loadModuleSerializationSources();
-    const workspaceRoot = this.getWorkspaceRootPath();
-    const candidatePaths = path.isAbsolute(jsonFilePath)
-      ? [jsonFilePath]
-      : workspaceRoot ? [jsonFilePath, path.join(workspaceRoot, jsonFilePath)] : [jsonFilePath];
-
-    const normalizedCandidates = candidatePaths.map(p => p.replace(/\\/g, '/').toLowerCase());
-    const normalizedInput = jsonFilePath.replace(/\\/g, '/').toLowerCase();
-
-    const source = sources.find(s => {
-      const normalizedSource = s.jsonUri.fsPath.replace(/\\/g, '/').toLowerCase();
-      return normalizedCandidates.includes(normalizedSource) || normalizedSource.endsWith(normalizedInput);
-    });
-    if (!source) {
+  async getModuleItemsListingByJsonPath(jsonFilePath: string): Promise<ModuleItemsListingData | undefined> {
+    const jsonUri = await this.resolveModuleJsonUri(jsonFilePath);
+    if (!jsonUri) {
       return undefined;
     }
 
-    const yamlPattern = new vscode.RelativePattern(source.rootUri, 'items/**/*.{yml,yaml}');
-    const yamlUris = await vscode.workspace.findFiles(yamlPattern);
+    let jsonBytes: Uint8Array;
+    let moduleJson: {
+      namespace?: string;
+      description?: string;
+      references?: string[];
+      roles?: ModulePrincipalPredicate[];
+      users?: ModulePrincipalPredicate[];
+      items?: { includes?: ModuleSerializationInclude[] };
+    };
 
-    const rowsByPath = new Map<string, {
-      itemPath: string;
-      status: 'Serialized directly' | 'Serialized indirectly';
-      includeOrRule: string;
-      yamlPath: string;
-      itemId?: string;
-    }>();
+    try {
+      jsonBytes = await vscode.workspace.fs.readFile(jsonUri);
+      moduleJson = JSON.parse(Buffer.from(jsonBytes).toString('utf8')) as {
+        namespace?: string;
+        description?: string;
+        references?: string[];
+        roles?: ModulePrincipalPredicate[];
+        users?: ModulePrincipalPredicate[];
+        items?: { includes?: ModuleSerializationInclude[] };
+      };
+    } catch {
+      return undefined;
+    }
 
-    for (const yamlUri of yamlUris) {
+    const jsonPathKey = jsonUri.fsPath.toLowerCase();
+    const jsonMd5 = this.computeMd5(jsonBytes);
+    const cachedEntry = this.moduleItemsListingCache.get(jsonPathKey);
+    if (cachedEntry && cachedEntry.md5 === jsonMd5) {
+      return cachedEntry.data;
+    }
+
+    const includes = Array.isArray(moduleJson.items?.includes)
+      ? moduleJson.items.includes.filter(include => typeof include?.path === 'string' && include.path.trim().length > 0)
+      : [];
+    const moduleName = moduleJson.namespace?.trim();
+    if (!moduleName || includes.length === 0) {
+      return undefined;
+    }
+
+    const source: ModuleSerializationSource = {
+      moduleName,
+      description: moduleJson.description,
+      references: this.normalizeReferences(moduleJson.references),
+      roles: this.normalizePrincipalPredicates(moduleJson.roles),
+      users: this.normalizePrincipalPredicates(moduleJson.users),
+      jsonUri,
+      rootUri: vscode.Uri.file(path.dirname(jsonUri.fsPath)),
+      includes,
+      pathConfigs: this.flattenPathConfigs(includes)
+    };
+
+    const itemYamlPattern = new vscode.RelativePattern(source.rootUri, 'items/**/*.{yml,yaml}');
+    const itemYamlUris = await vscode.workspace.findFiles(itemYamlPattern);
+    const contentYamlUris: vscode.Uri[] = [];
+    const roleYamlUris: vscode.Uri[] = [];
+    const userYamlUris: vscode.Uri[] = [];
+
+    for (const yamlUri of itemYamlUris) {
+      const relativeYamlPath = path.relative(source.rootUri.fsPath, yamlUri.fsPath).replace(/\\/g, '/').toLowerCase();
+      if (this.isPrincipalSerializationPath(relativeYamlPath, 'Role')) {
+        roleYamlUris.push(yamlUri);
+        continue;
+      }
+
+      if (this.isPrincipalSerializationPath(relativeYamlPath, 'User')) {
+        userYamlUris.push(yamlUri);
+        continue;
+      }
+
+      contentYamlUris.push(yamlUri);
+    }
+
+    const rowsByPathByDatabase = {
+      master: new Map<string, ModuleItemsListRow>(),
+      core: new Map<string, ModuleItemsListRow>()
+    };
+
+    for (const yamlUri of contentYamlUris) {
       let content = '';
       try {
         const bytes = await vscode.workspace.fs.readFile(yamlUri);
@@ -169,41 +244,287 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         continue;
       }
 
-      const match = this.getModulePathMatch(parsed.path, source.pathConfigs);
-      if (!match) {
+      const matches = this.getModulePathMatchesByDatabase(parsed.path, source.pathConfigs);
+      if (matches.length === 0) {
         continue;
       }
 
-      const normalizedPath = this.normalizePath(parsed.path);
-      const current = rowsByPath.get(normalizedPath);
-      const nextStatus: 'Serialized directly' | 'Serialized indirectly' =
-        match.status === SerializationStatus.Direct ? 'Serialized directly' : 'Serialized indirectly';
-      const nextRow = {
-        itemPath: normalizedPath,
-        status: nextStatus,
-        includeOrRule: this.getIncludeOrRuleLabel(match.config),
+      for (const entry of matches) {
+        const rowsByPath = entry.database === 'core'
+          ? rowsByPathByDatabase.core
+          : rowsByPathByDatabase.master;
+        const normalizedPath = this.normalizePath(parsed.path);
+        const current = rowsByPath.get(normalizedPath);
+        const nextStatus: 'Serialized directly' | 'Serialized indirectly' =
+          entry.match.status === SerializationStatus.Direct ? 'Serialized directly' : 'Serialized indirectly';
+        const nextRow: ModuleItemsListRow = {
+          itemPath: normalizedPath,
+          status: nextStatus,
+          includeOrRule: this.getIncludeOrRuleLabel(entry.match.config),
+          yamlPath: yamlUri.fsPath,
+          itemId: parsed.id
+        };
+
+        if (!current) {
+          rowsByPath.set(normalizedPath, nextRow);
+          continue;
+        }
+
+        if (current.status === 'Serialized indirectly' && nextRow.status === 'Serialized directly') {
+          rowsByPath.set(normalizedPath, nextRow);
+        }
+      }
+    }
+
+    const roleItems = await this.buildPrincipalRows(roleYamlUris, source.rootUri, source.roles, 'Role');
+    const userItems = await this.buildPrincipalRows(userYamlUris, source.rootUri, source.users, 'User');
+
+    const masterItems = Array.from(rowsByPathByDatabase.master.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
+    const coreItems = Array.from(rowsByPathByDatabase.core.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
+
+    const listingData: ModuleItemsListingData = {
+      moduleName: source.moduleName,
+      description: source.description,
+      references: source.references,
+      masterItems,
+      coreItems,
+      roleItems,
+      userItems
+    };
+
+    this.moduleItemsListingCache.set(jsonPathKey, {
+      md5: jsonMd5,
+      data: listingData
+    });
+
+    return listingData;
+  }
+
+  private computeMd5(content: Uint8Array): string {
+    return createHash('md5').update(Buffer.from(content)).digest('hex');
+  }
+
+  private async resolveModuleJsonUri(jsonFilePath: string): Promise<vscode.Uri | undefined> {
+    const workspaceRoot = this.getWorkspaceRootPath();
+    const candidatePaths = path.isAbsolute(jsonFilePath)
+      ? [jsonFilePath]
+      : workspaceRoot ? [jsonFilePath, path.join(workspaceRoot, jsonFilePath)] : [jsonFilePath];
+
+    for (const candidatePath of candidatePaths) {
+      const candidateUri = vscode.Uri.file(candidatePath);
+      try {
+        await vscode.workspace.fs.stat(candidateUri);
+        return candidateUri;
+      } catch {
+        // Ignore missing candidate and continue.
+      }
+    }
+
+    const sources = await this.loadModuleSerializationSources();
+    const normalizedCandidates = candidatePaths.map(p => p.replace(/\\/g, '/').toLowerCase());
+    const normalizedInput = jsonFilePath.replace(/\\/g, '/').toLowerCase();
+    const source = sources.find(s => {
+      const normalizedSource = s.jsonUri.fsPath.replace(/\\/g, '/').toLowerCase();
+      return normalizedCandidates.includes(normalizedSource) || normalizedSource.endsWith(normalizedInput);
+    });
+
+    return source?.jsonUri;
+  }
+
+  private async buildPrincipalRows(
+    yamlUris: vscode.Uri[],
+    rootUri: vscode.Uri,
+    predicates: ModulePrincipalPredicate[],
+    principalType: 'Role' | 'User'
+  ): Promise<ModuleItemsListRow[]> {
+    const rowsByPrincipal = new Map<string, ModuleItemsListRow>();
+
+    for (const yamlUri of yamlUris) {
+      let content = '';
+      try {
+        const bytes = await vscode.workspace.fs.readFile(yamlUri);
+        content = Buffer.from(bytes).toString('utf8');
+      } catch {
+        continue;
+      }
+
+      const parsed = this.parsePrincipalYamlMetadata(content, principalType);
+      const relativeYamlPath = path.relative(rootUri.fsPath, yamlUri.fsPath).replace(/\\/g, '/');
+      const principal = parsed.principal || this.derivePrincipalFromRelativePath(relativeYamlPath, principalType);
+      if (!principal) {
+        continue;
+      }
+
+      const predicateLabel = this.getMatchingPrincipalPredicateLabel(principal, predicates) || `${principalType} serialization`;
+      const normalizedPrincipal = principal.toLowerCase();
+      const nextRow: ModuleItemsListRow = {
+        itemPath: principal,
+        status: 'Serialized directly',
+        includeOrRule: predicateLabel,
         yamlPath: yamlUri.fsPath,
         itemId: parsed.id
       };
 
-      if (!current) {
-        rowsByPath.set(normalizedPath, nextRow);
-        continue;
-      }
-
-      if (current.status === 'Serialized indirectly' && nextRow.status === 'Serialized directly') {
-        rowsByPath.set(normalizedPath, nextRow);
+      const existing = rowsByPrincipal.get(normalizedPrincipal);
+      if (!existing) {
+        rowsByPrincipal.set(normalizedPrincipal, nextRow);
       }
     }
 
-    const items = Array.from(rowsByPath.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
+    return Array.from(rowsByPrincipal.values()).sort((a, b) => a.itemPath.localeCompare(b.itemPath));
+  }
 
+  private parsePrincipalYamlMetadata(content: string, principalType: 'Role' | 'User'): { principal?: string; id?: string } {
+    const lines = content.split(/\r?\n/);
+    const primaryKey = principalType === 'Role' ? 'Role' : 'UserName';
+    const inlineId = this.extractYamlScalarValue(lines, 'ID');
+    const directPrincipal = this.extractYamlScalarValue(lines, primaryKey);
+    if (directPrincipal) {
+      return { principal: directPrincipal, id: inlineId };
+    }
+
+    const roleNamePrincipal = principalType === 'Role'
+      ? this.extractYamlScalarValue(lines, 'RoleName')
+      : undefined;
+    if (roleNamePrincipal) {
+      return { principal: roleNamePrincipal, id: inlineId };
+    }
+
+    const pathValue = this.extractYamlScalarValue(lines, 'Path');
     return {
-      moduleName: source.moduleName,
-      description: source.description,
-      references: source.references,
-      items
+      principal: pathValue ? this.derivePrincipalFromPath(pathValue) : undefined,
+      id: inlineId
     };
+  }
+
+  private extractYamlScalarValue(lines: string[], key: string): string | undefined {
+    const keyRegex = new RegExp(`^(\\s*)${key}:\\s*(.*)$`, 'i');
+
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(keyRegex);
+      if (!match) {
+        continue;
+      }
+
+      const baseIndent = match[1].length;
+      const rawValue = match[2].trim();
+      if (rawValue.length > 0 && !/^[>|][+-]?$/u.test(rawValue)) {
+        return rawValue.replace(/^['"]|['"]$/g, '').trim();
+      }
+
+      const blockLines: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const nextLine = lines[j];
+        const nextMatch = nextLine.match(/^(\s*)(.*)$/);
+        if (!nextMatch) {
+          continue;
+        }
+
+        const nextIndent = nextMatch[1].length;
+        const nextContent = nextMatch[2];
+        if (nextContent.trim().length > 0 && nextIndent <= baseIndent) {
+          break;
+        }
+
+        if (nextContent.trim().length === 0) {
+          if (blockLines.length > 0) {
+            blockLines.push('');
+          }
+          continue;
+        }
+
+        blockLines.push(nextLine.slice(Math.min(nextLine.length, baseIndent + 2)).trimEnd());
+      }
+
+      const blockValue = blockLines.join('\n').trim();
+      if (blockValue.length > 0) {
+        return blockValue;
+      }
+    }
+
+    return undefined;
+  }
+
+  private derivePrincipalFromPath(pathValue: string): string {
+    const normalizedPath = this.normalizePath(pathValue);
+    const segments = normalizedPath.split('/').filter(segment => segment.length > 0);
+    if (segments.length === 0) {
+      return normalizedPath;
+    }
+
+    const domainsIndex = segments.findIndex(segment => segment.toLowerCase() === 'domains');
+    if (domainsIndex >= 0 && segments.length > domainsIndex + 2) {
+      const domain = segments[domainsIndex + 1];
+      const principalName = segments.slice(domainsIndex + 2).join('\\');
+      return `${domain}\\${principalName}`;
+    }
+
+    return segments[segments.length - 1];
+  }
+
+  private derivePrincipalFromRelativePath(relativePath: string, principalType: 'Role' | 'User'): string | undefined {
+    const normalizedPath = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+    const segments = normalizedPath.split('/').filter(segment => segment.length > 0);
+    const principalFolder = principalType === 'Role' ? '_roles' : '_users';
+    const principalIndex = segments.findIndex(segment => segment.toLowerCase() === principalFolder);
+    if (principalIndex < 0 || segments.length <= principalIndex + 2) {
+      return undefined;
+    }
+
+    const domain = segments[principalIndex + 1];
+    const principalSegments = segments.slice(principalIndex + 2);
+    if (principalSegments.length === 0) {
+      return undefined;
+    }
+
+    const lastSegment = principalSegments[principalSegments.length - 1];
+    principalSegments[principalSegments.length - 1] = lastSegment.replace(/\.(yml|yaml)$/i, '');
+    return `${domain}\\${principalSegments.join('\\')}`;
+  }
+
+  private isPrincipalSerializationPath(relativePath: string, principalType: 'Role' | 'User'): boolean {
+    const normalizedPath = relativePath.replace(/\\/g, '/').toLowerCase();
+    if (principalType === 'Role') {
+      return normalizedPath.includes('/_roles/');
+    }
+
+    return normalizedPath.includes('/_users/');
+  }
+
+  private getMatchingPrincipalPredicateLabel(principal: string, predicates: ModulePrincipalPredicate[]): string | undefined {
+    const [domainRaw, ...rest] = principal.split('\\');
+    const domain = (rest.length > 0 ? domainRaw : '').toLowerCase();
+    const principalName = (rest.length > 0 ? rest.join('\\') : principal).toLowerCase();
+
+    for (const predicate of predicates) {
+      const predicateDomain = (predicate.domain || '').trim().toLowerCase();
+      const predicatePattern = (predicate.pattern || '').trim();
+      if (!predicatePattern) {
+        continue;
+      }
+
+      if (predicateDomain && predicateDomain !== domain) {
+        continue;
+      }
+
+      const regex = this.toWildcardRegex(predicatePattern);
+      if (!regex.test(principalName)) {
+        continue;
+      }
+
+      return `${predicate.domain || '*'}\\${predicate.pattern}`;
+    }
+
+    return undefined;
+  }
+
+  private toWildcardRegex(pattern: string): RegExp {
+    const escaped = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.');
+
+    return new RegExp(`^${escaped}$`, 'i');
   }
 
   private isModuleFilterActive(): boolean {
@@ -616,6 +937,8 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         namespace?: string;
         description?: string;
         references?: string[];
+        roles?: ModulePrincipalPredicate[];
+        users?: ModulePrincipalPredicate[];
         items?: { includes?: ModuleSerializationInclude[] };
       }>(jsonUri);
       const moduleName = json?.namespace?.trim();
@@ -629,6 +952,8 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         moduleName,
         description: json?.description,
         references,
+        roles: this.normalizePrincipalPredicates(json?.roles),
+        users: this.normalizePrincipalPredicates(json?.users),
         jsonUri,
         rootUri: vscode.Uri.file(path.dirname(jsonUri.fsPath)),
         includes,
@@ -719,6 +1044,99 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     }
 
     return bestMatch;
+  }
+
+  private getModulePathMatchForDatabase(
+    itemPath: string,
+    pathConfigs: ModuleSerializationPathConfig[],
+    database: 'master' | 'core'
+  ): ModulePathMatch | undefined {
+    const normalizedItemPath = this.normalizePath(itemPath).toLowerCase();
+    let bestMatch: ModulePathMatch | undefined;
+
+    for (const config of pathConfigs) {
+      if (!config.path) {
+        continue;
+      }
+
+      const configDatabase = (config.database || 'master').toLowerCase();
+      if (configDatabase !== database) {
+        continue;
+      }
+
+      const normalizedConfigPath = config.path.toLowerCase();
+      const exactMatch = normalizedItemPath === normalizedConfigPath;
+      const descendantMatch = normalizedItemPath.startsWith(`${normalizedConfigPath}/`);
+
+      if (!exactMatch && !descendantMatch) {
+        continue;
+      }
+
+      if (this.isIgnoredScope(config.scope)) {
+        if (!bestMatch || normalizedConfigPath.length >= bestMatch.config.path.length) {
+          bestMatch = {
+            config,
+            status: SerializationStatus.NotSerialized
+          };
+        }
+        continue;
+      }
+
+      if (descendantMatch && !this.allowsDescendants(config.scope)) {
+        continue;
+      }
+
+      const candidateStatus = exactMatch ? SerializationStatus.Direct : SerializationStatus.Indirect;
+      if (!bestMatch || normalizedConfigPath.length > bestMatch.config.path.length) {
+        bestMatch = {
+          config,
+          status: candidateStatus
+        };
+      }
+    }
+
+    if (bestMatch?.status === SerializationStatus.NotSerialized) {
+      return undefined;
+    }
+
+    return bestMatch;
+  }
+
+  private getModulePathMatchesByDatabase(
+    itemPath: string,
+    pathConfigs: ModuleSerializationPathConfig[]
+  ): Array<{ database: 'master' | 'core'; match: ModulePathMatch }> {
+    const results: Array<{ database: 'master' | 'core'; match: ModulePathMatch }> = [];
+    const masterMatch = this.getModulePathMatchForDatabase(itemPath, pathConfigs, 'master');
+    if (masterMatch) {
+      results.push({ database: 'master', match: masterMatch });
+    }
+
+    const coreMatch = this.getModulePathMatchForDatabase(itemPath, pathConfigs, 'core');
+    if (coreMatch) {
+      results.push({ database: 'core', match: coreMatch });
+    }
+
+    return results;
+  }
+
+  private normalizePrincipalPredicates(predicates: unknown): ModulePrincipalPredicate[] {
+    if (!Array.isArray(predicates)) {
+      return [];
+    }
+
+    return predicates
+      .filter(predicate => typeof predicate === 'object' && predicate !== null)
+      .map(predicate => {
+        const rolePredicate = predicate as { domain?: unknown; pattern?: unknown };
+        const domain = typeof rolePredicate.domain === 'string' ? rolePredicate.domain.trim() : undefined;
+        const pattern = typeof rolePredicate.pattern === 'string' ? rolePredicate.pattern.trim() : undefined;
+        return {
+          domain,
+          pattern
+        };
+      })
+      .filter(predicate => !!predicate.pattern);
   }
 
   private async findModuleRootDirs(moduleName: string): Promise<vscode.Uri[]> {
@@ -933,6 +1351,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this.moduleRootItemsByPath.clear();
     this.parentPathByPath.clear();
     this.explainStatusCache.clear();
+    this.moduleItemsListingCache.clear();
 
     if (options?.resetState) {
       this.loadGeneration += 1;

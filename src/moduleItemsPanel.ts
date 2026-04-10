@@ -12,7 +12,10 @@ interface ModuleItemsPanelData {
   moduleName: string;
   description?: string;
   references?: string[];
-  items: ModuleItemsRow[];
+  masterItems: ModuleItemsRow[];
+  coreItems: ModuleItemsRow[];
+  roleItems: ModuleItemsRow[];
+  userItems: ModuleItemsRow[];
 }
 
 export class ModuleItemsPanel {
@@ -70,7 +73,10 @@ export class ModuleItemsPanel {
 
     const instance = new ModuleItemsPanel(panel, moduleJsonPath, {
       moduleName: this.deriveModuleName(moduleJsonPath),
-      items: []
+      masterItems: [],
+      coreItems: [],
+      roleItems: [],
+      userItems: []
     });
     ModuleItemsPanel.panels.set(key, instance);
     instance.showLoading();
@@ -104,7 +110,10 @@ export class ModuleItemsPanel {
   public update(data: ModuleItemsPanelData): void {
     this.data = {
       ...data,
-      items: [...data.items].sort((a, b) => a.itemPath.localeCompare(b.itemPath))
+      masterItems: [...data.masterItems].sort((a, b) => a.itemPath.localeCompare(b.itemPath)),
+      coreItems: [...data.coreItems].sort((a, b) => a.itemPath.localeCompare(b.itemPath)),
+      roleItems: [...data.roleItems].sort((a, b) => a.itemPath.localeCompare(b.itemPath)),
+      userItems: [...data.userItems].sort((a, b) => a.itemPath.localeCompare(b.itemPath))
     };
     this.panel.title = `Items: ${this.data.moduleName}`;
     this.panel.webview.html = this.getHtml();
@@ -162,29 +171,10 @@ export class ModuleItemsPanel {
       ? `<p class="references">References: ${references.map(reference => this.escapeHtml(reference)).join(', ')}</p>`
       : '';
 
-    const rowsHtml = this.data.items.length === 0
-      ? `<tr><td colspan="4" class="empty-row">No serialized items matched this module and selected database.</td></tr>`
-      : this.data.items.map(item => {
-        const idValue = item.itemId?.trim() || '';
-        const copyIdLink = idValue
-          ? `<a href="#" class="action-link copy-id" data-item-id="${this.escapeHtml(idValue)}">Copy ID</a>`
-          : '<span class="action-link disabled">Copy ID</span>';
-
-        return `
-          <tr>
-            <td class="path-cell">${this.escapeHtml(item.itemPath)}</td>
-            <td>${this.escapeHtml(item.status)}</td>
-            <td>${this.escapeHtml(item.includeOrRule)}</td>
-            <td>
-              <div class="actions">
-                <a href="#" class="action-link open-yaml" data-yaml-path="${this.escapeHtml(item.yamlPath)}">See YML</a>
-                <a href="#" class="action-link copy-path" data-item-path="${this.escapeHtml(item.itemPath)}">Copy Path</a>
-                ${copyIdLink}
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join('');
+    const masterHtml = this.renderTable('master', 'Master Database', this.data.masterItems, 'Path', 'No serialized master items matched this module.');
+    const coreHtml = this.renderTable('core', 'Core Database', this.data.coreItems, 'Path', 'No serialized core items matched this module.');
+    const rolesHtml = this.renderTable('roles', 'Roles', this.data.roleItems, 'Role', 'No serialized roles were found for this module.');
+    const usersHtml = this.renderTable('users', 'Users', this.data.userItems, 'User', 'No serialized users were found for this module.');
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -221,11 +211,45 @@ h1 {
   color: var(--muted);
   word-break: break-word;
 }
+.jump-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 18px;
+}
+.jump-button,
+.table-top-button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--vscode-sideBar-background) 88%, #7b3f00 12%);
+  color: var(--vscode-button-foreground);
+  padding: 6px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.jump-button:hover,
+.table-top-button:hover {
+  filter: brightness(1.08);
+}
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
 .table-wrap {
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: auto;
   background: color-mix(in srgb, var(--vscode-sideBar-background) 92%, #7b3f00 8%);
+  margin-bottom: 18px;
+}
+.table-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  letter-spacing: 0.02em;
 }
 table {
   border-collapse: collapse;
@@ -253,17 +277,36 @@ th {
 .actions {
   display: flex;
   gap: 12px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
+  white-space: nowrap;
 }
-.action-link {
+.action-link,
+.action-button {
   color: var(--vscode-textLink-foreground);
   text-decoration: none;
 }
+.action-button {
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
 .action-link:hover { text-decoration: underline; }
+.action-button:hover { text-decoration: underline; }
 .action-link.disabled {
   color: var(--muted);
   pointer-events: none;
   text-decoration: none;
+}
+.copy-cluster {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.copy-separator {
+  color: var(--muted);
 }
 .empty-row {
   color: var(--muted);
@@ -275,21 +318,16 @@ th {
   <h1>${this.escapeHtml(this.data.moduleName)}</h1>
   ${descriptionHtml}
   ${referencesHtml}
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Path</th>
-          <th>Status</th>
-          <th>Include / Rule</th>
-          <th>Links</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rowsHtml}
-      </tbody>
-    </table>
-  </div>
+  <nav class="jump-nav" aria-label="Jump to table section">
+    <button type="button" class="jump-button scroll-section" data-scroll-target="master">Master</button>
+    <button type="button" class="jump-button scroll-section" data-scroll-target="core">Core</button>
+    <button type="button" class="jump-button scroll-section" data-scroll-target="roles">Roles</button>
+    <button type="button" class="jump-button scroll-section" data-scroll-target="users">Users</button>
+  </nav>
+  ${masterHtml}
+  ${coreHtml}
+  ${rolesHtml}
+  ${usersHtml}
 
   <script>
     const vscode = acquireVsCodeApi();
@@ -329,9 +367,81 @@ th {
         }
       });
     });
+
+    document.querySelectorAll('.scroll-section').forEach(btn => {
+      btn.addEventListener('click', event => {
+        const target = event.currentTarget;
+        if (!(target instanceof HTMLElement)) { return; }
+        const sectionId = target.getAttribute('data-scroll-target');
+        if (!sectionId) { return; }
+        const section = document.getElementById(sectionId);
+        if (section) {
+          section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    });
+
+    document.querySelectorAll('.scroll-top').forEach(btn => {
+      btn.addEventListener('click', () => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+    });
   </script>
 </body>
 </html>`;
+  }
+
+  private renderTable(sectionId: string, title: string, rows: ModuleItemsRow[], firstColumnTitle: string, emptyMessage: string): string {
+    const includeCopyId = sectionId === 'master' || sectionId === 'core';
+    const showScrollTop = sectionId !== 'master';
+    const rowsHtml = rows.length === 0
+      ? `<tr><td colspan="4" class="empty-row">${this.escapeHtml(emptyMessage)}</td></tr>`
+      : rows.map(item => {
+        const idValue = item.itemId?.trim() || '';
+        const copyLinks = includeCopyId
+          ? (idValue
+              ? `<span class="copy-cluster"><span class="copy-separator">|</span><button type="button" class="action-button copy-path" data-item-path="${this.escapeHtml(item.itemPath)}">Path</button><span class="copy-separator">|</span><button type="button" class="action-button copy-id" data-item-id="${this.escapeHtml(idValue)}">ID</button></span>`
+              : `<span class="copy-cluster"><span class="copy-separator">|</span><button type="button" class="action-button copy-path" data-item-path="${this.escapeHtml(item.itemPath)}">Path</button><span class="copy-separator">|</span><span class="action-link disabled">ID</span></span>`)
+          : `<button type="button" class="action-button copy-path" data-item-path="${this.escapeHtml(item.itemPath)}">Copy Value</button>`;
+
+        return `
+          <tr>
+            <td class="path-cell">${this.escapeHtml(item.itemPath)}</td>
+            <td>${this.escapeHtml(item.status)}</td>
+            <td>${this.escapeHtml(item.includeOrRule)}</td>
+            <td>
+              <div class="actions">
+                <button type="button" class="action-button open-yaml" data-yaml-path="${this.escapeHtml(item.yamlPath)}">See YML</button>
+                ${copyLinks}
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+    return `
+      <section id="${this.escapeHtml(sectionId)}">
+        <div class="section-header">
+          <h2 class="table-title">${this.escapeHtml(title)}</h2>
+          ${showScrollTop ? '<button type="button" class="table-top-button scroll-top">Scroll to Top</button>' : ''}
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>${this.escapeHtml(firstColumnTitle)}</th>
+                <th>Status</th>
+                <th>Include / Rule</th>
+                <th>Links</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `;
   }
 
   private getLoadingHtml(moduleName: string): string {

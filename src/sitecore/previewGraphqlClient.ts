@@ -34,7 +34,7 @@ interface ItemByPathResponse {
 
 export class AuthoringGraphqlClient {
   private endpoint: string | undefined;
-  private headers: Record<string, string> | undefined;
+  private baseHeaders: Record<string, string> | undefined;
   private language: string = 'en';
   private database: string = 'master';
 
@@ -48,9 +48,27 @@ export class AuthoringGraphqlClient {
 
   reset(): void {
     this.endpoint = undefined;
-    this.headers = undefined;
+    this.baseHeaders = undefined;
     this.language = 'en';
     this.database = 'master';
+  }
+
+  private async buildRequestHeaders(): Promise<Record<string, string>> {
+    const headers: Record<string, string> = {
+      ...(this.baseHeaders ?? { 'Content-Type': 'application/json' })
+    };
+
+    const authToken = await this.loadSitecoreAccessToken();
+    if (!authToken) {
+      delete headers.Authorization;
+      return headers;
+    }
+
+    const tokenText = authToken.trim();
+    headers.Authorization = /^Bearer\s+/i.test(tokenText)
+      ? tokenText
+      : `Bearer ${tokenText}`;
+    return headers;
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -66,7 +84,6 @@ export class AuthoringGraphqlClient {
     const hostFromEnv = envVars['SITECORE_EDGE_HOSTNAME'];
     const contextId = envVars['SITECORE_EDGE_CONTEXT_ID'];
     const editingSecret = envVars['SITECORE_EDITING_SECRET'];
-    const authToken = await this.loadSitecoreAccessToken();
     this.language = config.get<string>('defaultLanguage') || envVars['LANGUAGE'] || 'en';
     this.database = this.database || config.get<string>('defaultDatabase') || envVars['SITECORE_DATABASE'] || 'master';
 
@@ -90,29 +107,11 @@ export class AuthoringGraphqlClient {
       this.endpoint = undefined;
     }
 
-    const headers: Record<string, string> = {
+    this.baseHeaders = {
       'Content-Type': 'application/json',
       ...(contextId ? { 'SC-Edge-Context-Id': contextId } : {}),
       ...(editingSecret ? { 'SC-Editing-Secret': editingSecret } : {})
     };
-
-    if (authToken) {
-      const tokenText = authToken.trim();
-      const isBearerToken = /^Bearer\s+/i.test(tokenText);
-      const tokenLength = tokenText.replace(/^Bearer\s+/i, '').length;
-      const parts = tokenText.split('.');
-      const isJwtFormat = parts.length === 3;
-
-      headers.Authorization = isBearerToken ? tokenText : `Bearer ${tokenText}`;
-      console.log(`Using Authorization Bearer token from .sitecore/user.json accessToken (${tokenLength} chars, JWT format: ${isJwtFormat}) for Authoring GraphQL.`);
-    } else {
-      const loginCommand = 'dotnet sitecore cloud login --allow-write true';
-      const warningMessage = `Sitecore access token not found in .sitecore/user.json. Please login with: ${loginCommand}`;
-      console.warn(warningMessage);
-      vscode.window.showWarningMessage(warningMessage);
-    }
-
-    this.headers = headers;
   }
 
   private async loadEnvFile(): Promise<Record<string, string>> {
@@ -218,11 +217,13 @@ export class AuthoringGraphqlClient {
       throw new Error('Authoring GraphQL endpoint not configured. Set sitecoreSerializationViewer.authoringGraphqlUrl or ensure .env.local has SITECORE_EDGE_HOSTNAME.');
     }
 
+    const requestHeaders = await this.buildRequestHeaders();
+
     console.log(`GraphQL request to: ${this.endpoint}`);
 
     const resp = await fetch(this.endpoint, {
       method: 'POST',
-      headers: this.headers!,
+      headers: requestHeaders,
       body: JSON.stringify({ query, variables })
     });
 

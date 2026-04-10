@@ -19,6 +19,14 @@ export interface ModuleSubtree {
   database?: string;
 }
 
+export interface SerializationIncludeInfo {
+  include: string;
+  path?: string;
+  scope?: string;
+  pushOperations?: string;
+  database?: string;
+}
+
 export class SerializationConfigService {
   private static instance: SerializationConfigService;
   private config: any;
@@ -43,6 +51,15 @@ export class SerializationConfigService {
    */
   private normalizePath(path: string): string {
     return path.toLowerCase().trim();
+  }
+
+  private normalizeModuleName(moduleName: string): string {
+    return moduleName.toLowerCase().trim();
+  }
+
+  private getModuleByNormalizedName(moduleName: string) {
+    const normalizedModuleName = this.normalizeModuleName(moduleName);
+    return this.config.modules.find((module: any) => this.normalizeModuleName(module.name) === normalizedModuleName);
   }
 
   /**
@@ -222,11 +239,50 @@ export class SerializationConfigService {
   }
 
   getModuleByName(moduleName: string) {
-    return this.config.modules.find((module: any) => module.name === moduleName);
+    return this.getModuleByNormalizedName(moduleName);
+  }
+
+  inferIncludeFromYamlPath(yamlPath?: string): string | undefined {
+    if (!yamlPath) {
+      return undefined;
+    }
+
+    const normalizedYamlPath = yamlPath.replace(/\\/g, '/');
+    const itemsMatch = normalizedYamlPath.match(/\/items\/([^/]+)\//i);
+    if (itemsMatch?.[1]) {
+      return itemsMatch[1];
+    }
+
+    return undefined;
+  }
+
+  getIncludeInfo(moduleName: string, includeName?: string): SerializationIncludeInfo | undefined {
+    const normalizedIncludeName = includeName?.toLowerCase().trim();
+    if (!normalizedIncludeName) {
+      return undefined;
+    }
+
+    const module = this.getModuleByNormalizedName(moduleName);
+    if (!module?.subtrees) {
+      return undefined;
+    }
+
+    const subtree = module.subtrees.find((entry: any) => typeof entry?.key === 'string' && entry.key.toLowerCase().trim() === normalizedIncludeName);
+    if (!subtree) {
+      return undefined;
+    }
+
+    return {
+      include: subtree.key,
+      path: subtree.path,
+      scope: subtree.scope,
+      pushOperations: subtree.pushOperations,
+      database: subtree.database
+    };
   }
 
   resolveModuleJsonPath(moduleName: string): string {
-    const module = this.getModuleByName(moduleName);
+    const module = this.getModuleByNormalizedName(moduleName);
     if (module?.jsonPath) {
       return module.jsonPath;
     }

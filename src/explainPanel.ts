@@ -128,11 +128,12 @@ p { margin: 0 0 0.8rem; }
 	}
 
 	private parseExplainOutput(item: SitecoreItem, explainOutput: string) {
+		const serializationConfigService = SerializationConfigService.getInstance();
 		const lines = explainOutput.split(/\r?\n/).filter(line => line.trim().length > 0);
 		const moduleName = item.matchedModule || (lines[0]?.match(/^\[([^\]]+)\]/)?.[1] ?? 'Unknown');
 		const moduleJsonPath = moduleName === 'Unknown'
 			? undefined
-			: (item.moduleJsonPath || SerializationConfigService.getInstance().resolveModuleJsonPath(moduleName));
+			: (item.moduleJsonPath || serializationConfigService.resolveModuleJsonPath(moduleName));
 		let status = 'Not serialized';
 		let isSerialized = false;
 		if (item.status === 'direct') {
@@ -147,10 +148,8 @@ p { margin: 0 0 0.8rem; }
 			isSerialized = false;
 		}
 
-		const yamlRegex = /([A-Za-z]:[\\/][^\s"']+\.(?:yml|yaml))/i;
-		const yamlPathFromOutput = lines
-			.map(line => line.match(yamlRegex)?.[1])
-			.find(Boolean);
+		const yamlRegex = /([A-Za-z]:[\\/].*?\.(?:yml|yaml))/i;
+		const yamlPathFromOutput = this.extractYamlPathFromExplainLines(lines, yamlRegex);
 
 		const reasonLines = lines
 			.filter(line =>
@@ -160,13 +159,23 @@ p { margin: 0 0 0.8rem; }
 			)
 			.map(line => line.replace(/^\[[^\]]+\]\s*/, ''));
 
-		const includeInfo = item.status === 'direct' && item.subtreeKey
+		const yamlPath = yamlPathFromOutput ?? item.yamlPath;
+		const inferredIncludeName = serializationConfigService.inferIncludeFromYamlPath(yamlPath);
+		const includeName = inferredIncludeName || item.subtreeKey;
+		const inferredIncludeInfo = moduleName === 'Unknown'
+			? undefined
+			: serializationConfigService.getIncludeInfo(moduleName, includeName);
+		const subtreeMatchesInclude = !!item.subtreeKey && !!includeName
+			&& item.subtreeKey.toLowerCase() === includeName.toLowerCase();
+		const itemSuggestsSerialization = item.status === 'direct' || item.status === 'indirect';
+
+		const includeInfo = includeName && (isSerialized || itemSuggestsSerialization)
 			? {
-				include: item.subtreeKey,
-				path: item.subtreePath,
-				scope: item.subtreeScope,
-				pushOperations: item.subtreePushOperations,
-				database: item.subtreeDatabase,
+				include: inferredIncludeInfo?.include || includeName,
+				path: inferredIncludeInfo?.path || (subtreeMatchesInclude ? item.subtreePath : undefined),
+				scope: inferredIncludeInfo?.scope || (subtreeMatchesInclude ? item.subtreeScope : undefined),
+				pushOperations: inferredIncludeInfo?.pushOperations || (subtreeMatchesInclude ? item.subtreePushOperations : undefined),
+				database: inferredIncludeInfo?.database || (subtreeMatchesInclude ? item.subtreeDatabase : undefined),
 				moduleJsonPath
 			}
 			: undefined;
@@ -178,9 +187,42 @@ p { margin: 0 0 0.8rem; }
 			status,
 			isSerialized,
 			reasons: reasonLines,
-			yamlPath: yamlPathFromOutput ?? item.yamlPath,
+			yamlPath,
 			directIncludeInfo: includeInfo
 		};
+	}
+
+	private extractYamlPathFromExplainLines(lines: string[], yamlRegex: RegExp): string | undefined {
+		const physicalPathLineIndex = lines.findIndex(line => /Physical path:/i.test(line));
+		if (physicalPathLineIndex >= 0) {
+			const inlineMatch = lines[physicalPathLineIndex].match(yamlRegex)?.[1];
+			if (inlineMatch) {
+				return this.sanitizeYamlPath(inlineMatch);
+			}
+
+			for (let i = physicalPathLineIndex + 1; i < lines.length; i++) {
+				const candidateLine = lines[i].trim();
+				if (!candidateLine) {
+					continue;
+				}
+
+				const candidateMatch = candidateLine.match(yamlRegex)?.[1] || candidateLine;
+				const sanitizedCandidate = this.sanitizeYamlPath(candidateMatch);
+				if (/^[A-Za-z]:[\\/].*\.(?:yml|yaml)$/i.test(sanitizedCandidate)) {
+					return sanitizedCandidate;
+				}
+			}
+		}
+
+		const fallbackMatch = lines
+			.map(line => line.match(yamlRegex)?.[1])
+			.find(Boolean);
+
+		return fallbackMatch ? this.sanitizeYamlPath(fallbackMatch) : undefined;
+	}
+
+	private sanitizeYamlPath(value: string): string {
+		return value.trim().replace(/^['"]+|['"]+$/g, '');
 	}
 
 	private getHtml(item: SitecoreItem, parsed: { moduleName: string; moduleDescription?: string; moduleJsonPath?: string; status: string; isSerialized: boolean; reasons: string[]; yamlPath?: string; directIncludeInfo?: { include: string; path?: string; scope?: string; pushOperations?: string; database?: string; moduleJsonPath?: string } }): string {
@@ -335,8 +377,10 @@ ${yamlSection}
 			return;
 		}
 
+		const normalizedYamlPath = this.sanitizeYamlPath(yamlPath);
+
 		const rootFolder = workspaceFolders[0].uri.fsPath;
-		const candidatePaths = [yamlPath, `${rootFolder}/${yamlPath}`];
+		const candidatePaths = [normalizedYamlPath, `${rootFolder}/${normalizedYamlPath}`];
 		let foundUri: vscode.Uri | undefined;
 
 		for (const candidate of candidatePaths) {
@@ -351,11 +395,11 @@ ${yamlSection}
 		}
 
 		if (!foundUri) {
-			const searchTerm = yamlPath.replace(/\\/g, '/').toLowerCase();
+			const searchTerm = normalizedYamlPath.replace(/\\/g, '/').toLowerCase();
 			const results = await vscode.workspace.findFiles('**/*.{yml,yaml}', '**/node_modules/**', 200);
 			foundUri = results.find(uri => uri.fsPath.toLowerCase().includes(searchTerm));
 			if (!foundUri) {
-				const basename = yamlPath.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+				const basename = normalizedYamlPath.split(/[\\/]/).pop()?.toLowerCase() ?? '';
 				foundUri = results.find(uri => uri.fsPath.toLowerCase().endsWith(basename));
 			}
 		}
@@ -366,7 +410,7 @@ ${yamlSection}
 			return;
 		}
 
-		vscode.window.showErrorMessage(`Unable to open YAML file: ${yamlPath}`);
+		vscode.window.showErrorMessage(`Unable to open YAML file: ${normalizedYamlPath}`);
 	}
 
 	private async resolveModuleJsonPath(inputPath: string): Promise<string | undefined> {

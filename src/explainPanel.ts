@@ -253,8 +253,10 @@ p { margin: 0 0 0.8rem; }
 			? `<section>\n\t<h1>YAML</h1>\n\t<p><a href=\"#\" id=\"open-yaml\" data-path=\"${this.escapeHtml(parsed.yamlPath!)}\">${this.escapeHtml(yamlFileName)}</a></p>\n</section>`
 			: '';
 
+		const showIncludeDetails = parsed.status !== 'Serialized (Directly)';
+
 		const includeSection = parsed.directIncludeInfo
-			? `<section>\n\t<h1>Included by</h1>\n\t<ul>\n\t\t<li><a href=\"#\" class=\"open-include\" data-include=\"${this.escapeHtml(parsed.directIncludeInfo.include)}\" data-json=\"${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}\">${this.escapeHtml(parsed.directIncludeInfo.include)}</a></li>\n\t\t${parsed.directIncludeInfo.path ? `<li>Path: ${this.escapeHtml(parsed.directIncludeInfo.path)}</li>` : ''}\n\t\t${parsed.directIncludeInfo.scope ? `<li>Scope: ${this.escapeHtml(parsed.directIncludeInfo.scope)}</li>` : ''}\n\t\t${parsed.directIncludeInfo.pushOperations ? `<li>Allowed Push Operations: ${this.escapeHtml(parsed.directIncludeInfo.pushOperations)}</li>` : ''}\n\t\t${parsed.directIncludeInfo.database ? `<li>Database: ${this.escapeHtml(parsed.directIncludeInfo.database)}</li>` : ''}\n\t</ul>\n</section>`
+			? `<section>\n\t<h1>Included by</h1>\n\t<ul>\n\t\t<li><a href=\"#\" class=\"open-include\" data-include=\"${this.escapeHtml(parsed.directIncludeInfo.include)}\" data-json=\"${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}\">${this.escapeHtml(parsed.directIncludeInfo.include)}</a></li>\n\t\t${showIncludeDetails && parsed.directIncludeInfo.path ? `<li>Path: ${this.escapeHtml(parsed.directIncludeInfo.path)}</li>` : ''}\n\t\t${showIncludeDetails && parsed.directIncludeInfo.scope ? `<li>Scope: ${this.escapeHtml(parsed.directIncludeInfo.scope)}</li>` : ''}\n\t\t${showIncludeDetails && parsed.directIncludeInfo.pushOperations ? `<li>Allowed Push Operations: ${this.escapeHtml(parsed.directIncludeInfo.pushOperations)}</li>` : ''}\n\t\t${showIncludeDetails && parsed.directIncludeInfo.database ? `<li>Database: ${this.escapeHtml(parsed.directIncludeInfo.database)}</li>` : ''}\n\t</ul>\n</section>`
 			: '';
 
 		return `<!DOCTYPE html>

@@ -27,4 +27,5 @@ export interface SitecoreItem {
   subtreePushOperations?: string;
   subtreeDatabase?: string;
   pushOperations?: string;
+  statusPending?: boolean;
 }

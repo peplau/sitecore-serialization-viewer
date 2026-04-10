@@ -25,6 +25,10 @@ export class SitecoreTreeItem extends vscode.TreeItem {
   }
 
   private getIconPath(item: SitecoreItem): vscode.ThemeIcon {
+    if (item.statusPending) {
+      return new vscode.ThemeIcon('question', new vscode.ThemeColor('disabledForeground'));
+    }
+
     switch (item.status) {
       case SerializationStatus.Direct:
         // Show yellow only if item is part of JSON files (has yamlPath)

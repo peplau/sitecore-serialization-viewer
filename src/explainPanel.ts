@@ -55,6 +55,22 @@ export class ExplainPanel {
 				}
 				await EditModulePanel.createOrShow(resolvedPath);
 			}
+			if (message.command === 'openIncludeJsonByPath' && message.jsonFilePath && message.includeName) {
+				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath) {
+					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
+					return;
+				}
+				await ExplainPanel.currentPanel?.openIncludeInModuleJson(resolvedPath, message.includeName, message.rulePath);
+			}
+			if (message.command === 'editModuleIncludeByPath' && message.jsonFilePath && message.includeName) {
+				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath) {
+					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
+					return;
+				}
+				await EditModulePanel.createOrShow(resolvedPath, { includeName: message.includeName, rulePath: message.rulePath });
+			}
 			if (message.command === 'viewItemsByPath' && message.jsonFilePath) {
 				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
 				if (!resolvedPath) {
@@ -130,10 +146,14 @@ p { margin: 0 0 0.8rem; }
 	private parseExplainOutput(item: SitecoreItem, explainOutput: string) {
 		const serializationConfigService = SerializationConfigService.getInstance();
 		const lines = explainOutput.split(/\r?\n/).filter(line => line.trim().length > 0);
-		const moduleName = item.matchedModule || (lines[0]?.match(/^\[([^\]]+)\]/)?.[1] ?? 'Unknown');
+		const explainModuleName = lines[0]?.match(/^\[([^\]]+)\]/)?.[1]?.trim();
+		const moduleName = explainModuleName || item.matchedModule || 'Unknown';
+		const moduleConfig = moduleName === 'Unknown'
+			? undefined
+			: serializationConfigService.getModuleByName(moduleName);
 		const moduleJsonPath = moduleName === 'Unknown'
 			? undefined
-			: (item.moduleJsonPath || serializationConfigService.resolveModuleJsonPath(moduleName));
+			: (moduleConfig?.jsonPath || serializationConfigService.resolveModuleJsonPath(moduleName));
 		let status = 'Not serialized';
 		let isSerialized = false;
 		if (item.status === 'direct') {
@@ -182,6 +202,8 @@ p { margin: 0 0 0.8rem; }
 			&& item.subtreeKey.toLowerCase() === includeName.toLowerCase();
 		const itemSuggestsSerialization = item.status === 'direct' || item.status === 'indirect';
 
+		const matchedRulePath = this.extractRulePathFromExplainLines(lines);
+
 		const includeInfo = includeName && (isSerialized || itemSuggestsSerialization)
 			? {
 				include: inferredIncludeInfo?.include || includeName,
@@ -189,13 +211,14 @@ p { margin: 0 0 0.8rem; }
 				scope: inferredIncludeInfo?.scope || (subtreeMatchesInclude ? item.subtreeScope : undefined),
 				pushOperations: inferredIncludeInfo?.pushOperations || (subtreeMatchesInclude ? item.subtreePushOperations : undefined),
 				database: inferredIncludeInfo?.database || (subtreeMatchesInclude ? item.subtreeDatabase : undefined),
-				moduleJsonPath
+				moduleJsonPath,
+				rulePath: matchedRulePath
 			}
 			: undefined;
 
 		return {
 			moduleName,
-			moduleDescription: moduleName === 'Unknown' ? undefined : item.moduleDescription,
+			moduleDescription: moduleName === 'Unknown' ? undefined : (moduleConfig?.description || item.moduleDescription),
 			moduleJsonPath,
 			status,
 			isSerialized,
@@ -238,7 +261,18 @@ p { margin: 0 0 0.8rem; }
 		return value.trim().replace(/^['"]+|['"]+$/g, '');
 	}
 
-	private getHtml(item: SitecoreItem, parsed: { moduleName: string; moduleDescription?: string; moduleJsonPath?: string; status: string; isSerialized: boolean; reasons: string[]; yamlPath?: string; directIncludeInfo?: { include: string; path?: string; scope?: string; pushOperations?: string; database?: string; moduleJsonPath?: string } }): string {
+	private extractRulePathFromExplainLines(lines: string[]): string | undefined {
+		for (const line of lines) {
+			const match = line.match(/\bRule\s+(.+?)\s+set allowed push operations/i);
+			if (match?.[1]) {
+				return match[1].trim();
+			}
+		}
+
+		return undefined;
+	}
+
+	private getHtml(item: SitecoreItem, parsed: { moduleName: string; moduleDescription?: string; moduleJsonPath?: string; status: string; isSerialized: boolean; reasons: string[]; yamlPath?: string; directIncludeInfo?: { include: string; path?: string; scope?: string; pushOperations?: string; database?: string; moduleJsonPath?: string; rulePath?: string } }): string {
 		const reasonHtml = parsed.reasons.length > 0
 			? parsed.reasons.map(line => `<li>${this.escapeHtml(line)}</li>`).join('')
 			: '<li>No explain output available.</li>';
@@ -253,10 +287,12 @@ p { margin: 0 0 0.8rem; }
 			? `<section>\n\t<h1>YAML</h1>\n\t<p><a href=\"#\" id=\"open-yaml\" data-path=\"${this.escapeHtml(parsed.yamlPath!)}\">${this.escapeHtml(yamlFileName)}</a></p>\n</section>`
 			: '';
 
-		const showIncludeDetails = parsed.status !== 'Serialized (Directly)';
+		const includeActions = parsed.directIncludeInfo
+			? `<div class="module-actions"><button type="button" id="open-include-editor" data-json="${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}" data-include="${this.escapeHtml(parsed.directIncludeInfo.include)}" data-rule-path="${this.escapeHtml(parsed.directIncludeInfo.rulePath || '')}">Edit</button><button type="button" id="open-include-json" data-json="${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}" data-include="${this.escapeHtml(parsed.directIncludeInfo.include)}" data-rule-path="${this.escapeHtml(parsed.directIncludeInfo.rulePath || '')}" ${(parsed.directIncludeInfo.moduleJsonPath || '').trim().length > 0 ? '' : 'disabled'}>JSON</button></div>`
+			: '';
 
 		const includeSection = parsed.directIncludeInfo
-			? `<section>\n\t<h1>Included by</h1>\n\t<ul>\n\t\t<li><a href=\"#\" class=\"open-include\" data-include=\"${this.escapeHtml(parsed.directIncludeInfo.include)}\" data-json=\"${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}\">${this.escapeHtml(parsed.directIncludeInfo.include)}</a></li>\n\t\t${showIncludeDetails && parsed.directIncludeInfo.path ? `<li>Path: ${this.escapeHtml(parsed.directIncludeInfo.path)}</li>` : ''}\n\t\t${showIncludeDetails && parsed.directIncludeInfo.scope ? `<li>Scope: ${this.escapeHtml(parsed.directIncludeInfo.scope)}</li>` : ''}\n\t\t${showIncludeDetails && parsed.directIncludeInfo.pushOperations ? `<li>Allowed Push Operations: ${this.escapeHtml(parsed.directIncludeInfo.pushOperations)}</li>` : ''}\n\t\t${showIncludeDetails && parsed.directIncludeInfo.database ? `<li>Database: ${this.escapeHtml(parsed.directIncludeInfo.database)}</li>` : ''}\n\t</ul>\n</section>`
+			? `<section>\n\t<h1>Included by</h1>\n\t<ul>\n\t\t<li>${this.escapeHtml(parsed.directIncludeInfo.include)}</li>\n\t\t${parsed.directIncludeInfo.rulePath ? `<li>Rule: ${this.escapeHtml(parsed.directIncludeInfo.rulePath)}</li>` : ''}\n\t</ul>\n\t${includeActions}\n</section>`
 			: '';
 
 		return `<!DOCTYPE html>
@@ -290,6 +326,10 @@ a:hover { text-decoration: underline; }
 }
 .module-actions button:hover {
 	opacity: 0.9;
+}
+.module-actions button:disabled {
+	opacity: 0.5;
+	cursor: default;
 }
 </style>
 </head>
@@ -367,19 +407,38 @@ ${yamlSection}
 		});
 	}
 
-	document.querySelectorAll('.open-include').forEach(el => {
-		el.addEventListener('click', event => {
+	const openIncludeEditorButton = document.getElementById('open-include-editor');
+	if (openIncludeEditorButton) {
+		openIncludeEditorButton.addEventListener('click', event => {
 			event.preventDefault();
 			const target = event.currentTarget;
 			if (target instanceof HTMLElement) {
+				const jsonFilePath = target.getAttribute('data-json');
 				const includeName = target.getAttribute('data-include');
-				const jsonPath = target.getAttribute('data-json');
-				if (includeName && jsonPath) {
-					vscode.postMessage({ command: 'openIncludeInJson', includeName, jsonPath });
+				const rulePath = target.getAttribute('data-rule-path');
+				if (jsonFilePath && includeName) {
+					vscode.postMessage({ command: 'editModuleIncludeByPath', jsonFilePath, includeName, rulePath });
 				}
 			}
 		});
-	});
+	}
+
+	const openIncludeJsonButton = document.getElementById('open-include-json');
+	if (openIncludeJsonButton) {
+		openIncludeJsonButton.addEventListener('click', event => {
+			event.preventDefault();
+			const target = event.currentTarget;
+			if (target instanceof HTMLElement) {
+				const jsonFilePath = target.getAttribute('data-json');
+				const includeName = target.getAttribute('data-include');
+				const rulePath = target.getAttribute('data-rule-path');
+				if (jsonFilePath && includeName) {
+					vscode.postMessage({ command: 'openIncludeJsonByPath', jsonFilePath, includeName, rulePath });
+				}
+			}
+		});
+	}
+
 </script>
 </body>
 </html>`;
@@ -495,6 +554,46 @@ ${yamlSection}
 		}
 
 		vscode.window.showErrorMessage(`Unable to open module JSON file: ${moduleName}`);
+	}
+
+	private async openIncludeInModuleJson(jsonFilePath: string, includeName: string, rulePath?: string): Promise<void> {
+		const targetUri = vscode.Uri.file(jsonFilePath);
+		const document = await vscode.workspace.openTextDocument(targetUri);
+		const editor = await vscode.window.showTextDocument(document, { preview: false });
+
+		const escapedIncludeName = includeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const escapedRulePath = (rulePath || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const includeNamePattern = new RegExp(`"name"\\s*:\\s*"${escapedIncludeName}"`, 'i');
+		const rulePathPattern = escapedRulePath
+			? new RegExp(`"path"\\s*:\\s*"${escapedRulePath}"`, 'i')
+			: undefined;
+		const fallbackPattern = new RegExp(escapedIncludeName, 'i');
+		const lines = document.getText().split(/\r?\n/);
+
+		let targetLineIndex = rulePathPattern
+			? lines.findIndex(line => rulePathPattern.test(line))
+			: -1;
+		if (targetLineIndex < 0) {
+			targetLineIndex = lines.findIndex(line => includeNamePattern.test(line));
+		}
+		if (targetLineIndex < 0) {
+			targetLineIndex = lines.findIndex(line => fallbackPattern.test(line));
+		}
+
+		if (targetLineIndex < 0) {
+			return;
+		}
+
+		const targetLine = lines[targetLineIndex];
+		const matchIndex = rulePathPattern
+			? targetLine.search(rulePathPattern)
+			: targetLine.search(includeNamePattern);
+		const column = matchIndex >= 0 ? matchIndex : 0;
+		const position = new vscode.Position(targetLineIndex, column);
+		const range = new vscode.Range(position, position);
+
+		editor.selection = new vscode.Selection(position, position);
+		editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
 	}
 
 	private escapeHtml(value: string): string {

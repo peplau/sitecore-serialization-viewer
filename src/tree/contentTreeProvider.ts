@@ -112,6 +112,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private expansionTraceCounter = 0;
   private moduleItemsTraceCounter = 0;
   private reconcileInFlightByPath: Map<string, Promise<void>> = new Map();
+  private scheduledTreeRefresh: ReturnType<typeof setTimeout> | undefined;
 
   constructor() {
     this.client = new AuthoringGraphqlClient();
@@ -187,6 +188,17 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private nextModuleItemsTraceId(moduleJsonPath: string): string {
     this.moduleItemsTraceCounter += 1;
     return `items-${this.moduleItemsTraceCounter}-${path.basename(moduleJsonPath)}`;
+  }
+
+  private scheduleTreeRefresh(): void {
+    if (this.scheduledTreeRefresh) {
+      return;
+    }
+
+    this.scheduledTreeRefresh = setTimeout(() => {
+      this.scheduledTreeRefresh = undefined;
+      this._onDidChangeTreeData.fire();
+    }, 120);
   }
 
   getSelectedDatabase(): string {
@@ -914,10 +926,19 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       vscode.window.showWarningMessage(`Sitecore GraphQL load failed (${basePath}). ${error instanceof Error ? error.message : ''}`);
     }
 
-    this.cache.set(basePath, items);
-    this.recordPerf('tree.rawChildren.cacheStore', 0, traceId, `path=${basePath}; count=${items.length}`);
-    this.startBackgroundReconcile(basePath, items, requestGeneration, traceId);
-    return items;
+    const hasCandidates = items.some(item => item.status === SerializationStatus.Indirect || item.status === SerializationStatus.Untracked);
+    const itemsForDisplay = hasCandidates
+      ? items.map(item =>
+        (item.status === SerializationStatus.Indirect || item.status === SerializationStatus.Untracked)
+          ? { ...item, statusPending: true }
+          : item
+      )
+      : items;
+
+    this.cache.set(basePath, itemsForDisplay);
+    this.recordPerf('tree.rawChildren.cacheStore', 0, traceId, `path=${basePath}; count=${itemsForDisplay.length}`);
+    this.startBackgroundReconcile(basePath, itemsForDisplay, requestGeneration, traceId);
+    return itemsForDisplay;
   }
 
   private startBackgroundReconcile(basePath: string, items: SitecoreItem[], requestGeneration: number, traceId?: string): void {
@@ -934,7 +955,27 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     const reconcilePromise = (async () => {
       const reconciled = await this.withTiming(
         'tree.children.reconcileStatuses.background',
-        () => this.reconcileIndirectStatuses(items, traceId),
+        () => this.reconcileIndirectStatuses(items, traceId, (index, nextItem) => {
+          if (requestGeneration !== this.loadGeneration) {
+            return;
+          }
+
+          const currentProgress = this.cache.get(basePath);
+          if (!currentProgress || index < 0 || index >= currentProgress.length) {
+            return;
+          }
+
+          const currentItem = currentProgress[index];
+          if (currentItem.status === nextItem.status && !!currentItem.statusPending === !!nextItem.statusPending) {
+            return;
+          }
+
+          const progressedItems = [...currentProgress];
+          progressedItems[index] = nextItem;
+          this.cache.set(basePath, progressedItems);
+          this.recordPerf('tree.children.reconcileStatuses.background.progressApplied', 0, traceId, `path=${basePath}; index=${index}`);
+          this.scheduleTreeRefresh();
+        }),
         traceId,
         `path=${basePath}; count=${items.length}`
       );
@@ -951,7 +992,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
 
       let changed = false;
       for (let i = 0; i < current.length; i++) {
-        if (current[i].status !== reconciled[i].status) {
+        if (current[i].status !== reconciled[i].status || !!current[i].statusPending !== !!reconciled[i].statusPending) {
           changed = true;
           break;
         }
@@ -968,6 +1009,18 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     })().catch(error => {
       console.warn(`Background reconcile failed for path ${basePath}:`, error);
       this.recordPerf('tree.children.reconcileStatuses.background.error', 0, traceId, `path=${basePath}`);
+
+      const current = this.cache.get(basePath);
+      if (!current) {
+        return;
+      }
+
+      const clearedPending = current.map(item => item.statusPending ? { ...item, statusPending: false } : item);
+      const hadPending = current.some(item => item.statusPending);
+      if (hadPending) {
+        this.cache.set(basePath, clearedPending);
+        this.scheduleTreeRefresh();
+      }
     });
 
     this.reconcileInFlightByPath.set(basePath, reconcilePromise.finally(() => {
@@ -1686,7 +1739,11 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this._onDidChangeTreeData.fire();
   }
 
-  private async reconcileIndirectStatuses(items: SitecoreItem[], traceId?: string): Promise<SitecoreItem[]> {
+  private async reconcileIndirectStatuses(
+    items: SitecoreItem[],
+    traceId?: string,
+    onProgress?: (index: number, nextItem: SitecoreItem) => void
+  ): Promise<SitecoreItem[]> {
     const updated = [...items];
     const candidates: Array<{ index: number; item: SitecoreItem }> = [];
 
@@ -1717,6 +1774,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
           const currentIndex = nextCandidate;
           nextCandidate += 1;
           const candidate = candidates[currentIndex];
+          const previous = updated[candidate.index];
 
           const resolvedStatus = await this.withTiming(
             'tree.explain.resolveStatus',
@@ -1725,11 +1783,28 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
             `path=${candidate.item.path}`
           );
 
+          const currentUpdated = updated[candidate.index];
+          if (currentUpdated.statusPending) {
+            updated[candidate.index] = {
+              ...currentUpdated,
+              statusPending: false
+            };
+          }
+
           if (resolvedStatus && resolvedStatus !== candidate.item.status) {
             updated[candidate.index] = {
-              ...candidate.item,
-              status: resolvedStatus
+              ...updated[candidate.index],
+              status: resolvedStatus,
+              statusPending: false
             };
+          }
+
+          const nextResolved = updated[candidate.index];
+          if (
+            onProgress &&
+            (previous.status !== nextResolved.status || !!previous.statusPending !== !!nextResolved.statusPending)
+          ) {
+            onProgress(candidate.index, nextResolved);
           }
         }
       });

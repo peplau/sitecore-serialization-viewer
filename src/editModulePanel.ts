@@ -94,6 +94,8 @@ export class EditModulePanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly jsonFileUri: vscode.Uri;
   private rawJson: ModuleFileJson = { namespace: '' };
+  private pendingRevealIncludeName: string | undefined;
+  private pendingRevealRulePath: string | undefined;
 
   private constructor(panel: vscode.WebviewPanel, jsonFileUri: vscode.Uri) {
     this.panel = panel;
@@ -110,11 +112,14 @@ export class EditModulePanel {
     });
   }
 
-  public static async createOrShow(jsonFilePath: string): Promise<void> {
+  public static async createOrShow(jsonFilePath: string, options?: { includeName?: string; rulePath?: string }): Promise<void> {
     const key = jsonFilePath.toLowerCase();
     const existing = EditModulePanel.panels.get(key);
     if (existing) {
       existing.panel.reveal(vscode.ViewColumn.Active);
+      if (options?.includeName || options?.rulePath) {
+        existing.panel.webview.postMessage({ command: 'revealInclude', includeName: options?.includeName, rulePath: options?.rulePath });
+      }
       return;
     }
 
@@ -129,6 +134,8 @@ export class EditModulePanel {
     );
 
     const instance = new EditModulePanel(panel, jsonFileUri);
+    instance.pendingRevealIncludeName = options?.includeName;
+    instance.pendingRevealRulePath = options?.rulePath;
     EditModulePanel.panels.set(key, instance);
     await instance.loadAndRender();
   }
@@ -356,6 +363,8 @@ export class EditModulePanel {
   }
 
   private buildHtml(): string {
+    const initialRevealIncludeNameJson = JSON.stringify(this.pendingRevealIncludeName ?? '');
+    const initialRevealRulePathJson = JSON.stringify(this.pendingRevealRulePath ?? '');
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -825,6 +834,8 @@ button { cursor: pointer; font: inherit; }
 <script type="application/json" id="initial-data">${this.buildInitialDataJson()}</script>
 <script>
   const vscode = acquireVsCodeApi();
+  const initialRevealIncludeName = ${initialRevealIncludeNameJson};
+  const initialRevealRulePath = ${initialRevealRulePathJson};
   const data = JSON.parse(document.getElementById('initial-data').textContent);
   data.references = Array.isArray(data.references) ? data.references : [];
   data.roles = Array.isArray(data.roles) ? data.roles : [];
@@ -850,7 +861,7 @@ button { cursor: pointer; font: inherit; }
       '<option value="CreateAndUpdate"' + (rule.allowedPushOperations === 'CreateAndUpdate' ? ' selected' : '') + '>CreateAndUpdate</option>' +
       '<option value="CreateUpdateAndDelete"' + (rule.allowedPushOperations === 'CreateUpdateAndDelete' ? ' selected' : '') + '>CreateUpdateAndDelete</option>';
 
-    return '<div class="rule-block">' +
+    return '<div class="rule-block" data-rule-path="' + esc(rule.path || '') + '">' +
       '<div class="rule-fields">' +
         '<div class="rule-field">' +
           '<label>Path<span class="req">*</span></label>' +
@@ -910,7 +921,7 @@ button { cursor: pointer; font: inherit; }
 
     var rulesHtml = (inc.rules || []).map(ruleHtml).join('');
 
-      return '<div class="include-block collapsed" data-id="' + id + '">' +
+      return '<div class="include-block collapsed" data-id="' + id + '" data-include-name="' + esc(inc.name || '') + '">' +
         '<div class="include-header include-drag-handle" draggable="true">' +
           '<div class="include-title-row">' +
             '<button type="button" class="include-toggle">▶</button>' +
@@ -1102,6 +1113,82 @@ button { cursor: pointer; font: inherit; }
     }
   }
 
+  function revealIncludeByName(includeName) {
+    if (!includeName) {
+      return;
+    }
+
+    var normalizedTarget = String(includeName).trim().toLowerCase();
+    if (!normalizedTarget) {
+      return;
+    }
+
+    var includeBlocks = Array.from(document.querySelectorAll('.include-block'));
+    var targetBlock = includeBlocks.find(function(block) {
+      var headerName = (block.getAttribute('data-include-name') || '').trim().toLowerCase();
+      if (headerName === normalizedTarget) {
+        return true;
+      }
+
+      var input = block.querySelector('.inc-name');
+      var inputName = input ? String(input.value || '').trim().toLowerCase() : '';
+      return inputName === normalizedTarget;
+    });
+
+    if (!targetBlock) {
+      return;
+    }
+
+    targetBlock.classList.remove('collapsed');
+    var toggle = targetBlock.querySelector('.include-toggle');
+    if (toggle) {
+      toggle.textContent = '▼';
+    }
+
+    targetBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    var includeNameInput = targetBlock.querySelector('.inc-name');
+    if (includeNameInput) {
+      includeNameInput.focus();
+    }
+  }
+
+  function revealRuleByPath(rulePath, includeName) {
+    if (!rulePath) {
+      return;
+    }
+
+    var normalizedRulePath = String(rulePath).trim().toLowerCase();
+    if (!normalizedRulePath) {
+      return;
+    }
+
+    var ruleInputs = Array.from(document.querySelectorAll('.rule-path'));
+    var targetInput = ruleInputs.find(function(input) {
+      return String(input.value || '').trim().toLowerCase() === normalizedRulePath;
+    });
+
+    if (!targetInput) {
+      revealIncludeByName(includeName);
+      return;
+    }
+
+    var targetRuleBlock = targetInput.closest('.rule-block');
+    var targetIncludeBlock = targetInput.closest('.include-block');
+    if (targetIncludeBlock) {
+      targetIncludeBlock.classList.remove('collapsed');
+      var toggle = targetIncludeBlock.querySelector('.include-toggle');
+      if (toggle) {
+        toggle.textContent = '▼';
+      }
+    }
+
+    if (targetRuleBlock) {
+      targetRuleBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    targetInput.focus();
+  }
+
   function clearIncludeDropIndicators() {
     document.querySelectorAll('.include-block.drop-before, .include-block.drop-after').forEach(function(block) {
       block.classList.remove('drop-before');
@@ -1129,6 +1216,16 @@ button { cursor: pointer; font: inherit; }
   renderExcludedFields();
   renderRoles();
   renderUsers();
+
+  if (initialRevealRulePath) {
+    setTimeout(function() {
+      revealRuleByPath(initialRevealRulePath, initialRevealIncludeName);
+    }, 50);
+  } else if (initialRevealIncludeName) {
+    setTimeout(function() {
+      revealIncludeByName(initialRevealIncludeName);
+    }, 50);
+  }
 
   document.getElementById('namespace').addEventListener('input', function() {
     document.getElementById('title-ns').textContent = this.value;
@@ -1491,6 +1588,18 @@ button { cursor: pointer; font: inherit; }
       feedback.textContent = 'Saved \u2713';
       feedback.className = 'feedback ok';
       setTimeout(function() { feedback.textContent = ''; }, 2500);
+      return;
+    }
+
+    if (event.data && event.data.command === 'revealInclude') {
+      if (event.data.rulePath) {
+        revealRuleByPath(event.data.rulePath, event.data.includeName);
+        return;
+      }
+
+      if (event.data.includeName) {
+        revealIncludeByName(event.data.includeName);
+      }
     }
   });
 </script>

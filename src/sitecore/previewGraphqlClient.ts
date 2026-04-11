@@ -134,9 +134,8 @@ export class AuthoringGraphqlClient {
     const envVars = await this.loadEnvFile();
     const hostFromEnv = envVars['SITECORE_EDGE_HOSTNAME'];
     const contextId = envVars['SITECORE_EDGE_CONTEXT_ID'];
-    const editingSecret = envVars['SITECORE_EDITING_SECRET'];
     this.language = config.get<string>('defaultLanguage') || envVars['LANGUAGE'] || 'en';
-    this.database = this.database || config.get<string>('defaultDatabase') || envVars['SITECORE_DATABASE'] || 'master';
+    this.database = this.database || config.get<string>('defaultDatabase') || 'master';
 
     if (explicitUrl && explicitUrl.trim().length > 0) {
       this.endpoint = explicitUrl.trim();
@@ -160,8 +159,7 @@ export class AuthoringGraphqlClient {
 
     this.baseHeaders = {
       'Content-Type': 'application/json',
-      ...(contextId ? { 'SC-Edge-Context-Id': contextId } : {}),
-      ...(editingSecret ? { 'SC-Editing-Secret': editingSecret } : {})
+      ...(contextId ? { 'SC-Edge-Context-Id': contextId } : {})
     };
   }
 

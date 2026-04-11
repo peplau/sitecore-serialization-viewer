@@ -27,7 +27,7 @@
         "sitecoreSerializationViewer.defaultSiteName": {
           "type": "string",
           "default": "my-website",
-          "description": "Default site name for GraphQL preview (fallback/environment variable NEXT_PUBLIC_DEFAULT_SITE_NAME)"
+          "description": "Default site name for GraphQL preview"
         },
         "sitecoreSerializationViewer.defaultLanguage": {
           "type": "string",
@@ -37,7 +37,7 @@
         "sitecoreSerializationViewer.defaultDatabase": {
           "type": "string",
           "default": "master",
-          "description": "Default Sitecore database for GraphQL requests (fallback/environment variable SITECORE_DATABASE)"
+          "description": "Default Sitecore database for GraphQL requests"
         }
       }
     },

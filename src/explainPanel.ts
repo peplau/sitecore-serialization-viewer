@@ -514,8 +514,54 @@ ${yamlSection}
 			const normalized = uri.fsPath.replace(/\\/g, '/').toLowerCase();
 			return normalized.endsWith(normalizedInput);
 		});
+		if (matched) {
+			return matched.fsPath;
+		}
 
-		return matched?.fsPath;
+		const inputBaseName = path.basename(inputPath).replace(/\.json$/i, '');
+		const inputBaseToken = this.normalizeLookupToken(inputBaseName);
+		const inputParentToken = this.normalizeLookupToken(path.basename(path.dirname(inputPath)));
+		const normalizedInputToken = this.normalizeLookupToken(normalizedInput);
+
+		let bestScore = 0;
+		let bestMatch: vscode.Uri | undefined;
+		for (const uri of jsonUris) {
+			const normalized = uri.fsPath.replace(/\\/g, '/').toLowerCase();
+			const fileNameToken = this.normalizeLookupToken(path.basename(normalized).replace(/\.json$/i, ''));
+			const parentToken = this.normalizeLookupToken(path.basename(path.dirname(normalized)));
+			const fullToken = this.normalizeLookupToken(normalized);
+
+			let score = 0;
+			if (inputBaseToken && fileNameToken === inputBaseToken) {
+				score += 80;
+			}
+			if (inputParentToken && parentToken === inputParentToken) {
+				score += 45;
+			}
+			if (inputBaseToken && parentToken === inputBaseToken) {
+				score += 30;
+			}
+			if (inputBaseToken && fullToken.includes(inputBaseToken)) {
+				score += 20;
+			}
+			if (normalizedInputToken && fullToken.includes(normalizedInputToken)) {
+				score += 15;
+			}
+			if (normalized.includes('/serialization/')) {
+				score += 5;
+			}
+
+			if (score > bestScore) {
+				bestScore = score;
+				bestMatch = uri;
+			}
+		}
+
+		if (bestMatch) {
+			return bestMatch.fsPath;
+		}
+
+		return undefined;
 	}
 
 	private async openModuleJsonFile(moduleName: string): Promise<void> {
@@ -545,6 +591,39 @@ ${yamlSection}
 			const normalizedModuleName = moduleName.toLowerCase();
 			const results = await vscode.workspace.findFiles('**/*.json', '**/node_modules/**', 200);
 			foundUri = results.find(uri => uri.fsPath.toLowerCase().includes(normalizedModuleName));
+
+			if (!foundUri) {
+				const moduleToken = this.normalizeLookupToken(moduleName);
+				let bestScore = 0;
+				let bestMatch: vscode.Uri | undefined;
+				for (const uri of results) {
+					const normalized = uri.fsPath.replace(/\\/g, '/').toLowerCase();
+					const fileNameToken = this.normalizeLookupToken(path.basename(normalized).replace(/\.json$/i, ''));
+					const parentToken = this.normalizeLookupToken(path.basename(path.dirname(normalized)));
+					const fullToken = this.normalizeLookupToken(normalized);
+
+					let score = 0;
+					if (moduleToken && fileNameToken === moduleToken) {
+						score += 85;
+					}
+					if (moduleToken && parentToken === moduleToken) {
+						score += 55;
+					}
+					if (moduleToken && fullToken.includes(moduleToken)) {
+						score += 20;
+					}
+					if (normalized.includes('/serialization/')) {
+						score += 5;
+					}
+
+					if (score > bestScore) {
+						bestScore = score;
+						bestMatch = uri;
+					}
+				}
+
+				foundUri = bestMatch;
+			}
 		}
 
 		if (foundUri) {
@@ -598,5 +677,9 @@ ${yamlSection}
 
 	private escapeHtml(value: string): string {
 		return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	}
+
+	private normalizeLookupToken(value: string): string {
+		return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 	}
 }

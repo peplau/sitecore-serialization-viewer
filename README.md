@@ -23,7 +23,7 @@ It provides:
 
 Each tree node is colored by status:
 
-- **Direct (yellow/orange)**: path directly matches a serialization include/rule.
+- **Direct (yellow)**: path directly matches a serialization include/rule.
 - **Indirect (orange)**: path is serialized through parent/include scope.
 - **Untracked (gray)**: unresolved or not yet fully evaluated.
 - **Not serialized (dim/disabled gray)**: path not part of effective serialization.

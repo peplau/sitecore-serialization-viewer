@@ -1,13 +1,13 @@
-# Sitecore Serialization Viewer
+ # Sitecore Serialization Viewer
 
-Sitecore Serialization Viewer is a Visual Studio Code extension that helps Sitecore developers inspect, validate, and edit Sitecore Content Serialization (SCS) configuration from inside the editor.
+Sitecore Serialization Viewer is a Visual Studio Code extension that helps Sitecore developers visualize, inspect, validate, and edit Sitecore Content Serialization (SCS) configuration from inside the IDE.
 
 It provides:
 
 - A live Sitecore content tree (via Authoring GraphQL).
 - Serialization status visualization (direct, indirect, untracked, not serialized).
-- Integrated `dotnet sitecore ser explain` analysis.
-- Module-level exploration across configured `*.module.json` files.
+- Integrated `explain` analysis.
+- Module-level exploration across configured `json` files.
 - In-editor module configuration editing for includes, rules, excluded fields, roles, and users.
 
 ## Features
@@ -23,7 +23,7 @@ It provides:
 
 Each tree node is colored by status:
 
-- **Direct (yellow/orange)**: path directly matches a serialization include/rule.
+- **Direct (yellow)**: path directly matches a serialization include/rule.
 - **Indirect (orange)**: path is serialized through parent/include scope.
 - **Untracked (gray)**: unresolved or not yet fully evaluated.
 - **Not serialized (dim/disabled gray)**: path not part of effective serialization.

@@ -10,14 +10,25 @@ export class ExplainPanel {
 	private readonly panel: vscode.WebviewPanel;
 	private readonly extensionUri: vscode.Uri;
 	private readonly onViewItems: (jsonFilePath: string) => Promise<void>;
+	private readonly resolveModuleJsonPathByModuleName: (moduleName: string) => Promise<string | undefined>;
 
-	private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, onViewItems: (jsonFilePath: string) => Promise<void>) {
+	private constructor(
+		panel: vscode.WebviewPanel,
+		extensionUri: vscode.Uri,
+		onViewItems: (jsonFilePath: string) => Promise<void>,
+		resolveModuleJsonPath: (moduleName: string) => Promise<string | undefined>
+	) {
 		this.panel = panel;
 		this.extensionUri = extensionUri;
 		this.onViewItems = onViewItems;
+		this.resolveModuleJsonPathByModuleName = resolveModuleJsonPath;
 	}
 
-	public static createOrShow(extensionUri: vscode.Uri, onViewItems: (jsonFilePath: string) => Promise<void>): ExplainPanel {
+	public static createOrShow(
+		extensionUri: vscode.Uri,
+		onViewItems: (jsonFilePath: string) => Promise<void>,
+		resolveModuleJsonPath: (moduleName: string) => Promise<string | undefined>
+	): ExplainPanel {
 		const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : vscode.ViewColumn.One;
 
 		if (ExplainPanel.currentPanel) {
@@ -35,7 +46,7 @@ export class ExplainPanel {
 			}
 		);
 
-		ExplainPanel.currentPanel = new ExplainPanel(panel, extensionUri, onViewItems);
+		ExplainPanel.currentPanel = new ExplainPanel(panel, extensionUri, onViewItems, resolveModuleJsonPath);
 		ExplainPanel.currentPanel.panel.onDidDispose(() => {
 			ExplainPanel.currentPanel = undefined;
 		});
@@ -44,11 +55,31 @@ export class ExplainPanel {
 			if (message.command === 'openYaml' && message.yamlPath) {
 				await ExplainPanel.currentPanel?.openYamlFile(message.yamlPath);
 			}
-			if (message.command === 'openModuleJson' && message.moduleName) {
-				await ExplainPanel.currentPanel?.openModuleJsonFile(message.moduleName);
+			if (message.command === 'openModuleJson' && (message.moduleName || message.jsonFilePath)) {
+				let resolvedPath = message.jsonFilePath
+					? await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath)
+					: undefined;
+				if (!resolvedPath && message.moduleName) {
+					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+				}
+				if (resolvedPath) {
+					const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(resolvedPath));
+					await vscode.window.showTextDocument(doc);
+					return;
+				}
+
+				if (message.moduleName) {
+					await ExplainPanel.currentPanel?.openModuleJsonFile(message.moduleName);
+					return;
+				}
+
+				vscode.window.showErrorMessage('Unable to resolve module JSON file.');
 			}
 			if (message.command === 'editModuleByPath' && message.jsonFilePath) {
-				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath && message.moduleName) {
+					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
 					return;
@@ -56,7 +87,10 @@ export class ExplainPanel {
 				await EditModulePanel.createOrShow(resolvedPath);
 			}
 			if (message.command === 'openIncludeJsonByPath' && message.jsonFilePath && message.includeName) {
-				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath && message.moduleName) {
+					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
 					return;
@@ -64,7 +98,10 @@ export class ExplainPanel {
 				await ExplainPanel.currentPanel?.openIncludeInModuleJson(resolvedPath, message.includeName, message.rulePath);
 			}
 			if (message.command === 'editModuleIncludeByPath' && message.jsonFilePath && message.includeName) {
-				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath && message.moduleName) {
+					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
 					return;
@@ -72,7 +109,10 @@ export class ExplainPanel {
 				await EditModulePanel.createOrShow(resolvedPath, { includeName: message.includeName, rulePath: message.rulePath });
 			}
 			if (message.command === 'viewItemsByPath' && message.jsonFilePath) {
-				const resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				if (!resolvedPath && message.moduleName) {
+					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
 					return;
@@ -84,8 +124,8 @@ export class ExplainPanel {
 		return ExplainPanel.currentPanel;
 	}
 
-	public update(item: SitecoreItem, explainOutput: string): void {
-		const parsed = this.parseExplainOutput(item, explainOutput);
+	public async update(item: SitecoreItem, explainOutput: string): Promise<void> {
+		const parsed = await this.parseExplainOutput(item, explainOutput);
 		this.panel.title = `Explain: ${item.path}`;
 		this.panel.webview.html = this.getHtml(item, parsed);
 	}
@@ -143,17 +183,20 @@ p { margin: 0 0 0.8rem; }
 </html>`;
 	}
 
-	private parseExplainOutput(item: SitecoreItem, explainOutput: string) {
-		const serializationConfigService = SerializationConfigService.getInstance();
+	private async parseExplainOutput(item: SitecoreItem, explainOutput: string) {
 		const lines = explainOutput.split(/\r?\n/).filter(line => line.trim().length > 0);
 		const explainModuleName = lines[0]?.match(/^\[([^\]]+)\]/)?.[1]?.trim();
 		const moduleName = explainModuleName || item.matchedModule || 'Unknown';
+		const serializationConfigService = SerializationConfigService.getInstance();
 		const moduleConfig = moduleName === 'Unknown'
 			? undefined
 			: serializationConfigService.getModuleByName(moduleName);
-		const moduleJsonPath = moduleName === 'Unknown'
-			? undefined
-			: (moduleConfig?.jsonPath || serializationConfigService.resolveModuleJsonPath(moduleName));
+		
+		// Use item.moduleJsonPath if available, otherwise try to resolve dynamically
+		let moduleJsonPath = item.moduleJsonPath;
+		if (!moduleJsonPath && moduleName !== 'Unknown') {
+			moduleJsonPath = await this.resolveModuleJsonPathByModuleName(moduleName);
+		}
 		let status = 'Not serialized';
 		let isSerialized = false;
 		if (item.status === 'direct') {
@@ -278,7 +321,7 @@ p { margin: 0 0 0.8rem; }
 			: '<li>No explain output available.</li>';
 
 		const moduleSection = parsed.moduleName !== 'Unknown'
-			? `<section>\n\t<h1>Module</h1>\n\t<p><a href="#" id="open-module-json" data-module="${this.escapeHtml(parsed.moduleName)}">${this.escapeHtml(parsed.moduleName)}</a>${parsed.moduleDescription ? ` - ${this.escapeHtml(parsed.moduleDescription)}` : ''}</p>\n\t${parsed.moduleJsonPath ? `<div class="module-actions"><button type="button" id="edit-module" data-json="${this.escapeHtml(parsed.moduleJsonPath)}">Edit</button><button type="button" id="view-module-items" data-json="${this.escapeHtml(parsed.moduleJsonPath)}">View Items</button></div>` : ''}\n</section>`
+			? `<section>\n\t<h1>Module</h1>\n\t<p><a href="#" id="open-module-json" data-module="${this.escapeHtml(parsed.moduleName)}" data-json="${this.escapeHtml(parsed.moduleJsonPath || '')}">${this.escapeHtml(parsed.moduleName)}</a>${parsed.moduleDescription ? ` - ${this.escapeHtml(parsed.moduleDescription)}` : ''}</p>\n\t${parsed.moduleJsonPath ? `<div class="module-actions"><button type="button" id="edit-module" data-json="${this.escapeHtml(parsed.moduleJsonPath)}" data-module="${this.escapeHtml(parsed.moduleName)}">Edit</button><button type="button" id="view-module-items" data-json="${this.escapeHtml(parsed.moduleJsonPath)}" data-module="${this.escapeHtml(parsed.moduleName)}">View Items</button></div>` : ''}\n</section>`
 			: '';
 
 
@@ -288,7 +331,7 @@ p { margin: 0 0 0.8rem; }
 			: '';
 
 		const includeActions = parsed.directIncludeInfo
-			? `<div class="module-actions"><button type="button" id="open-include-editor" data-json="${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}" data-include="${this.escapeHtml(parsed.directIncludeInfo.include)}" data-rule-path="${this.escapeHtml(parsed.directIncludeInfo.rulePath || '')}">Edit</button><button type="button" id="open-include-json" data-json="${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}" data-include="${this.escapeHtml(parsed.directIncludeInfo.include)}" data-rule-path="${this.escapeHtml(parsed.directIncludeInfo.rulePath || '')}" ${(parsed.directIncludeInfo.moduleJsonPath || '').trim().length > 0 ? '' : 'disabled'}>JSON</button></div>`
+			? `<div class="module-actions"><button type="button" id="open-include-editor" data-json="${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}" data-module="${this.escapeHtml(parsed.moduleName)}" data-include="${this.escapeHtml(parsed.directIncludeInfo.include)}" data-rule-path="${this.escapeHtml(parsed.directIncludeInfo.rulePath || '')}">Edit</button><button type="button" id="open-include-json" data-json="${this.escapeHtml(parsed.directIncludeInfo.moduleJsonPath || '')}" data-module="${this.escapeHtml(parsed.moduleName)}" data-include="${this.escapeHtml(parsed.directIncludeInfo.include)}" data-rule-path="${this.escapeHtml(parsed.directIncludeInfo.rulePath || '')}" ${(parsed.directIncludeInfo.moduleJsonPath || '').trim().length > 0 ? '' : 'disabled'}>JSON</button></div>`
 			: '';
 
 		const includeSection = parsed.directIncludeInfo
@@ -372,8 +415,9 @@ ${yamlSection}
 			const target = event.currentTarget;
 			if (target instanceof HTMLElement) {
 				const moduleName = target.getAttribute('data-module');
-				if (moduleName) {
-					vscode.postMessage({ command: 'openModuleJson', moduleName });
+				const jsonFilePath = target.getAttribute('data-json');
+				if (moduleName || jsonFilePath) {
+					vscode.postMessage({ command: 'openModuleJson', moduleName, jsonFilePath });
 				}
 			}
 		});
@@ -386,8 +430,9 @@ ${yamlSection}
 			const target = event.currentTarget;
 			if (target instanceof HTMLElement) {
 				const jsonFilePath = target.getAttribute('data-json');
+				const moduleName = target.getAttribute('data-module');
 				if (jsonFilePath) {
-					vscode.postMessage({ command: 'editModuleByPath', jsonFilePath });
+					vscode.postMessage({ command: 'editModuleByPath', jsonFilePath, moduleName });
 				}
 			}
 		});
@@ -400,8 +445,9 @@ ${yamlSection}
 			const target = event.currentTarget;
 			if (target instanceof HTMLElement) {
 				const jsonFilePath = target.getAttribute('data-json');
+				const moduleName = target.getAttribute('data-module');
 				if (jsonFilePath) {
-					vscode.postMessage({ command: 'viewItemsByPath', jsonFilePath });
+					vscode.postMessage({ command: 'viewItemsByPath', jsonFilePath, moduleName });
 				}
 			}
 		});
@@ -414,10 +460,11 @@ ${yamlSection}
 			const target = event.currentTarget;
 			if (target instanceof HTMLElement) {
 				const jsonFilePath = target.getAttribute('data-json');
+				const moduleName = target.getAttribute('data-module');
 				const includeName = target.getAttribute('data-include');
 				const rulePath = target.getAttribute('data-rule-path');
 				if (jsonFilePath && includeName) {
-					vscode.postMessage({ command: 'editModuleIncludeByPath', jsonFilePath, includeName, rulePath });
+					vscode.postMessage({ command: 'editModuleIncludeByPath', jsonFilePath, moduleName, includeName, rulePath });
 				}
 			}
 		});
@@ -430,10 +477,11 @@ ${yamlSection}
 			const target = event.currentTarget;
 			if (target instanceof HTMLElement) {
 				const jsonFilePath = target.getAttribute('data-json');
+				const moduleName = target.getAttribute('data-module');
 				const includeName = target.getAttribute('data-include');
 				const rulePath = target.getAttribute('data-rule-path');
 				if (jsonFilePath && includeName) {
-					vscode.postMessage({ command: 'openIncludeJsonByPath', jsonFilePath, includeName, rulePath });
+					vscode.postMessage({ command: 'openIncludeJsonByPath', jsonFilePath, moduleName, includeName, rulePath });
 				}
 			}
 		});
@@ -557,7 +605,7 @@ ${yamlSection}
 			}
 		}
 
-		if (bestMatch) {
+		if (bestMatch && bestScore >= 30) {
 			return bestMatch.fsPath;
 		}
 

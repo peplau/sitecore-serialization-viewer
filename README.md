@@ -137,7 +137,7 @@ Save behavior:
 
 ### 12) Performance Diagnostics (Optional)
 
-If `DEBUG=true` is present (environment or `.env.local`):
+When `debug` is enabled (via VS Code setting `sitecoreSerializationViewer.debug` or `DEBUG=true` in `.env.local`):
 
 - Enables performance output channel: **Sitecore Serialization Performance**.
 - Logs timing for GraphQL, tree expansion, module item indexing, and reconcile operations.
@@ -154,10 +154,9 @@ The extension assumes a Sitecore development workspace with serialization assets
 
 ### Runtime dependencies for full functionality
 
-- **Authoring GraphQL endpoint**:
-	- Set `sitecoreSerializationViewer.authoringGraphqlUrl`, or
-	- Provide `.env.local` with `SITECORE_EDGE_HOSTNAME` (and optional `SITECORE_EDGE_CONTEXT_ID`).
+- **Authoring GraphQL endpoint**: configure via `sitecoreSerializationViewer.authoringGraphqlUrl` (full URL) or `SITECORE_EDGE_HOSTNAME` (hostname). See the [Configuration](#configuration) table.
 - **Authentication token** in `.sitecore/user.json` (typically after `dotnet sitecore cloud login`).
+  The token is read from `endpoints.<name>.accessToken` where `<name>` defaults to `xmCloud`; override with the `endpoint` setting or `ENDPOINT` env var.
 - `dotnet sitecore ser explain` available on PATH for explain/reconciliation features.
 
 ### Recommended workspace files
@@ -166,23 +165,18 @@ The extension assumes a Sitecore development workspace with serialization assets
 - Resolved module JSON files (`*.module.json`, `*.json`, etc.) containing `items.includes`.
 - Serialized YAML trees under each module root in `items/`.
 
-## Extension Settings
+## Configuration
 
-This extension contributes the following settings:
+All options can be set either as a **VS Code setting** (via `settings.json` or the Settings UI) or as a **`.env.local` variable** in the workspace root. VS Code settings take precedence over `.env.local` variables when both are present.
 
-- `sitecoreSerializationViewer.authoringGraphqlUrl`
-	- Optional full Authoring GraphQL URL.
-	- Example: `https://<hostname>/sitecore/api/authoring/graphql/v1/`
-- `sitecoreSerializationViewer.defaultSiteName`
-	- Default site name used for GraphQL preview context.
-	- Default: `my-website`
-- `sitecoreSerializationViewer.defaultLanguage`
-	- Default Sitecore language for GraphQL requests.
-	- Falls back to `LANGUAGE` from `.env.local`.
-	- Default: `en`
-- `sitecoreSerializationViewer.defaultDatabase`
-	- Default Sitecore database used by tree queries.
-	- Default: `master`
+| VS Code Setting | `.env.local` Variable | Default | Description |
+|---|---|---|---|
+| `sitecoreSerializationViewer.authoringGraphqlUrl` | `SITECORE_EDGE_HOSTNAME` | — | Authoring GraphQL endpoint. The VS Code setting accepts a full URL; the env var accepts a hostname or full URL (the API path is appended automatically). The VS Code setting takes precedence. |
+| `sitecoreSerializationViewer.edgeContextId` | `SITECORE_EDGE_CONTEXT_ID` | — | Sitecore Edge context ID sent as the `SC-Edge-Context-Id` request header. |
+| `sitecoreSerializationViewer.endpoint` | `ENDPOINT` | `xmCloud` | Endpoint key inside `.sitecore/user.json → endpoints` from which the `accessToken` is read (for example, `dev` if your CLI login stored the token under a `dev` key). |
+| `sitecoreSerializationViewer.defaultLanguage` | `LANGUAGE` | `en` | Default Sitecore language for GraphQL requests. |
+| `sitecoreSerializationViewer.defaultDatabase` | `DATABASE` | `master` | Default Sitecore database for tree queries. |
+| `sitecoreSerializationViewer.debug` | `DEBUG` | `false` | Set to `true` to enable the performance diagnostics output channel: **Sitecore Serialization Performance**. |
 
 ## Known Issues
 

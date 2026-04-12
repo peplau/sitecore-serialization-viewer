@@ -22,22 +22,32 @@
         "sitecoreSerializationViewer.authoringGraphqlUrl": {
           "type": "string",
           "default": "",
-          "description": "Optional full Authoring GraphQL URL for Sitecore (e.g., https://<hostname>/sitecore/api/authoring/graphql/v1/)"
+          "description": "Optional full Authoring GraphQL URL (e.g., https://<hostname>/sitecore/api/authoring/graphql/v1/). Env var equivalent: SITECORE_EDGE_HOSTNAME (accepts hostname or full URL)."
         },
-        "sitecoreSerializationViewer.defaultSiteName": {
+        "sitecoreSerializationViewer.edgeContextId": {
           "type": "string",
-          "default": "my-website",
-          "description": "Default site name for GraphQL preview"
+          "default": "",
+          "description": "Sitecore Edge context ID sent as the SC-Edge-Context-Id request header. Env var equivalent: SITECORE_EDGE_CONTEXT_ID."
+        },
+        "sitecoreSerializationViewer.endpoint": {
+          "type": "string",
+          "default": "xmCloud",
+          "description": "Endpoint key inside .sitecore/user.json -> endpoints from which the accessToken is read. Env var equivalent: ENDPOINT."
         },
         "sitecoreSerializationViewer.defaultLanguage": {
           "type": "string",
           "default": "en",
-          "description": "Default Sitecore language for GraphQL requests (fallback/environment variable LANGUAGE)"
+          "description": "Default Sitecore language for GraphQL requests. Env var equivalent: LANGUAGE."
         },
         "sitecoreSerializationViewer.defaultDatabase": {
           "type": "string",
           "default": "master",
-          "description": "Default Sitecore database for GraphQL requests"
+          "description": "Default Sitecore database for tree queries. Env var equivalent: DATABASE."
+        },
+        "sitecoreSerializationViewer.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the performance diagnostics output channel. Env var equivalent: DEBUG."
         }
       }
     },

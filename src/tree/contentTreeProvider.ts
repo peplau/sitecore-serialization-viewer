@@ -1839,7 +1839,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
       }
 
       if (/\bis included[.!]?/i.test(text)) {
-        const isDirect = /item path matches subtree scope/i.test(text);
+        const isDirect = !/item path matches subtree scope/i.test(text);
         const resolvedStatus = isDirect ? SerializationStatus.Direct : SerializationStatus.Indirect;
         this.explainStatusCache.set(itemPath, resolvedStatus);
         return resolvedStatus;

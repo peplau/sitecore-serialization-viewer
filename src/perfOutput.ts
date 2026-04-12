@@ -63,6 +63,11 @@ export function isPerfTracingEnabled(): boolean {
     return true;
   }
 
+  const settingEnabled = vscode.workspace.getConfiguration('sitecoreSerializationViewer').get<boolean>('debug') === true;
+  if (settingEnabled) {
+    return true;
+  }
+
   const dotEnvDebug = tryGetDebugFromDotEnvLocal();
   const dotEnvEnabled = typeof dotEnvDebug === 'string' && normalizeFlagValue(dotEnvDebug) === 'true';
   if (dotEnvEnabled) {

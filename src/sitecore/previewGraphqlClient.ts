@@ -38,6 +38,7 @@ export class AuthoringGraphqlClient {
   private baseHeaders: Record<string, string> | undefined;
   private language: string = 'en';
   private database: string = 'master';
+  private endpointName: string = 'xmCloud';
   private cachedAuthToken: string | undefined;
   private authTokenCacheLoadedAt = 0;
   private authTokenCacheInitialized = false;
@@ -86,6 +87,7 @@ export class AuthoringGraphqlClient {
     this.baseHeaders = undefined;
     this.language = 'en';
     this.database = 'master';
+    this.endpointName = 'xmCloud';
     this.cachedAuthToken = undefined;
     this.authTokenCacheLoadedAt = 0;
     this.authTokenCacheInitialized = false;
@@ -133,9 +135,10 @@ export class AuthoringGraphqlClient {
     // Read from .env.local file in workspace
     const envVars = await this.loadEnvFile();
     const hostFromEnv = envVars['SITECORE_EDGE_HOSTNAME'];
-    const contextId = envVars['SITECORE_EDGE_CONTEXT_ID'];
+    const contextId = config.get<string>('edgeContextId') || envVars['SITECORE_EDGE_CONTEXT_ID'];
+    this.endpointName = config.get<string>('endpoint') || envVars['ENDPOINT'] || 'xmCloud';
     this.language = config.get<string>('defaultLanguage') || envVars['LANGUAGE'] || 'en';
-    this.database = this.database || config.get<string>('defaultDatabase') || 'master';
+    this.database = this.database || config.get<string>('defaultDatabase') || envVars['DATABASE'] || 'master';
 
     if (explicitUrl && explicitUrl.trim().length > 0) {
       this.endpoint = explicitUrl.trim();
@@ -216,19 +219,22 @@ export class AuthoringGraphqlClient {
         endpoints?: Record<string, { accessToken?: unknown } | unknown>;
       };
 
-      // Primary expected shape: .sitecore/user.json -> endpoints -> dev -> accessToken
-      const devAccessToken =
+      // Primary expected shape: .sitecore/user.json -> endpoints -> <endpointName> -> accessToken
+      const targetEndpoint =
         parsed.endpoints &&
-        typeof parsed.endpoints === 'object' &&
-        parsed.endpoints.dev &&
-        typeof parsed.endpoints.dev === 'object' &&
-        parsed.endpoints.dev !== null &&
-        'accessToken' in parsed.endpoints.dev
-          ? (parsed.endpoints.dev as { accessToken?: unknown }).accessToken
+        typeof parsed.endpoints === 'object'
+          ? (parsed.endpoints as Record<string, unknown>)[this.endpointName]
+          : undefined;
+      const namedAccessToken =
+        targetEndpoint &&
+        typeof targetEndpoint === 'object' &&
+        targetEndpoint !== null &&
+        'accessToken' in targetEndpoint
+          ? (targetEndpoint as { accessToken?: unknown }).accessToken
           : undefined;
 
-      if (typeof devAccessToken === 'string' && devAccessToken.trim().length > 0) {
-        return devAccessToken.trim();
+      if (typeof namedAccessToken === 'string' && namedAccessToken.trim().length > 0) {
+        return namedAccessToken.trim();
       }
 
       // Backward-compatible fallback: top-level accessToken

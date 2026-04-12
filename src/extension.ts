@@ -240,6 +240,12 @@ export function activate(context: vscode.ExtensionContext) {
 	const exec = promisify(execCallback);
 
 	const showDetailsCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.showDetails', async (item: SitecoreItem) => {
+		const resolveModuleJsonPathFn = async (moduleName: string): Promise<string | undefined> => {
+			const modules = await treeProvider.getModuleListingItems();
+			const module = modules.find(m => m.namespace.toLowerCase() === moduleName.toLowerCase());
+			return module?.jsonFilePath;
+		};
+
 		const panel = ExplainPanel.createOrShow(context.extensionUri, async (jsonFilePath: string) => {
 			const itemsPanel = ModuleItemsPanel.createOrShowLoading(jsonFilePath);
 			const moduleItems = await treeProvider.getModuleItemsListingByJsonPath(jsonFilePath);
@@ -251,10 +257,10 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 
 			itemsPanel.update(moduleItems);
-		});
+		}, resolveModuleJsonPathFn);
 		panel.showLoading(item.path);
 		const explainResult = await runSitecoreExplain(item.path);
-		panel.update(item, explainResult);
+		await panel.update(item, explainResult);
 	});
 
 	const showAllModulesCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.showAllModules', async () => {

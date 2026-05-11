@@ -3,6 +3,7 @@ import { AuthoringGraphqlClient } from './sitecore/previewGraphqlClient';
 import { SerializationConfigService } from './sitecore/serializationConfigService';
 import { SitecoreItem, SerializationStatus } from './tree/models';
 import { Buffer } from 'buffer';
+import * as path from 'path';
 
 interface RuleJson {
   path?: string;
@@ -159,6 +160,7 @@ export class EditModulePanel {
   private readonly jsonFileUri: vscode.Uri;
   private readonly graphqlClient = new AuthoringGraphqlClient();
   private readonly iconCache = new Map<string, string>();
+  private readonly includeSerializedPaths = new Map<string, Set<string>>();
   private static readonly iconCacheMaxSize = 200;
   private rawJson: ModuleFileJson = { namespace: '' };
   private pendingRevealIncludeName: string | undefined;
@@ -206,6 +208,7 @@ export class EditModulePanel {
     });
 
     this.panel.onDidDispose(() => {
+      this.includeSerializedPaths.clear();
       EditModulePanel.panels.delete(this.jsonFileUri.fsPath.toLowerCase());
     });
   }
@@ -524,6 +527,49 @@ export class EditModulePanel {
     return (pathValue || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   }
 
+  private parseYamlItemPath(content: string): string | undefined {
+    const pathMatch = content.match(/^\s*Path:\s*(.+?)\s*$/m);
+    if (!pathMatch?.[1]) {
+      return undefined;
+    }
+
+    const rawPath = pathMatch[1].trim().replace(/^['"]|['"]$/g, '');
+    const normalizedPath = this.normalizePath(rawPath);
+    return normalizedPath.startsWith('/sitecore/') ? normalizedPath : undefined;
+  }
+
+  private async loadSerializedItemPathsForModule(): Promise<Set<string>> {
+    const serializedPaths = new Set<string>();
+    const moduleRootUri = vscode.Uri.file(path.dirname(this.jsonFileUri.fsPath));
+    const itemYmlPattern = new vscode.RelativePattern(moduleRootUri, 'items/**/*.yml');
+    const itemYamlPattern = new vscode.RelativePattern(moduleRootUri, 'items/**/*.yaml');
+    const [itemYmlUris, itemYamlUris] = await Promise.all([
+      vscode.workspace.findFiles(itemYmlPattern),
+      vscode.workspace.findFiles(itemYamlPattern)
+    ]);
+    const allYamlUrisByPath = new Map<string, vscode.Uri>();
+    for (const yamlUri of [...itemYmlUris, ...itemYamlUris]) {
+      allYamlUrisByPath.set(yamlUri.fsPath.toLowerCase(), yamlUri);
+    }
+
+    for (const yamlUri of allYamlUrisByPath.values()) {
+      let yamlContent = '';
+      try {
+        const bytes = await vscode.workspace.fs.readFile(yamlUri);
+        yamlContent = Buffer.from(bytes).toString('utf8');
+      } catch {
+        continue;
+      }
+
+      const itemPath = this.parseYamlItemPath(yamlContent);
+      if (itemPath) {
+        serializedPaths.add(itemPath);
+      }
+    }
+
+    return serializedPaths;
+  }
+
   private isPathInIncludeScope(itemPath: string | undefined, includePath: string | undefined, includeScope: string | undefined): boolean {
     const normalizedItemPath = this.normalizePath(itemPath);
     const normalizedIncludePath = this.normalizePath(includePath);
@@ -632,16 +678,14 @@ export class EditModulePanel {
     return normalizedSubtreeKey === normalizedIncludeName || normalizedInferredInclude === normalizedIncludeName;
   }
 
-  private mapTreeNode(item: SitecoreItem, database: string, includeName?: string, includePath?: string, includeScope?: string): IncludeTreeNodeDto {
+  private mapTreeNode(item: SitecoreItem, database: string, includeName?: string, includePath?: string, includeScope?: string, isSerializedByYaml = false): IncludeTreeNodeDto {
     let includeScopedStatus: SerializationStatus;
 
     if (includePath) {
-      // Include path is known: only color if item was enriched (in this module's includes)
-      if (item.yamlPath) {
-        // Item is in this module's includes → use scope calculation
+      // Include tree coloring is based on real serialized item evidence (YAML existence).
+      if (isSerializedByYaml) {
         includeScopedStatus = this.getIncludeScopedStatus(item, includePath, includeScope);
       } else {
-        // Item is not in this module's includes yet → gray
         includeScopedStatus = SerializationStatus.NotSerialized;
       }
     } else {
@@ -670,29 +714,11 @@ export class EditModulePanel {
     includeName: string | undefined,
     includePath: string | undefined,
     includeScope: string | undefined,
-    visitedPaths: Set<string>
+    visitedPaths: Set<string>,
+    serializedItemPaths: Set<string>
   ): Promise<IncludeTreeNodeWithChildrenDto> {
-    // Enrich item only if it's in this module's includes list
-    const includes = Array.isArray(this.rawJson.items?.includes) ? this.rawJson.items.includes : [];
     const normalizedItemPath = this.normalizePath(item.path);
-    
-    for (const inc of includes) {
-      const normalizedIncludePath = this.normalizePath(inc.path);
-      if (normalizedItemPath === normalizedIncludePath || 
-          normalizedItemPath.startsWith(normalizedIncludePath + '/')) {
-        // Item is in THIS module's includes → enrich from config
-        const configService = SerializationConfigService.getInstance();
-        const match = configService.checkSerializationStatus(item.path);
-        if (match) {
-          item.status = match.status;
-          item.matchedModule = match.moduleName;
-          item.yamlPath = match.yamlPath;
-        }
-        break;
-      }
-    }
-
-    const node = this.mapTreeNode(item, database, includeName, includePath, includeScope);
+    const node = this.mapTreeNode(item, database, includeName, includePath, includeScope, serializedItemPaths.has(normalizedItemPath));
     const normalizedPath = item.path.toLowerCase();
 
     if (visitedPaths.has(normalizedPath)) {
@@ -709,7 +735,7 @@ export class EditModulePanel {
     if (item.hasChildren) {
       try {
         const rawChildren: SitecoreItem[] = await this.graphqlClient.getChildren(item.path);
-        children = await Promise.all(rawChildren.map((child: SitecoreItem) => this.buildIncludeTreeNode(child, database, includeName, includePath, includeScope, visitedPaths)));
+        children = await Promise.all(rawChildren.map((child: SitecoreItem) => this.buildIncludeTreeNode(child, database, includeName, includePath, includeScope, visitedPaths, serializedItemPaths)));
       } catch (error) {
         // Keep rendering the rest of the tree if a single branch cannot be expanded.
         console.warn(`Unable to load children for ${item.path}:`, error);
@@ -724,10 +750,10 @@ export class EditModulePanel {
     };
   }
 
-  private async buildIncludeTreeChildren(path: string, database: string, includeName: string | undefined, includePath?: string, includeScope?: string): Promise<IncludeTreeNodeWithChildrenDto[]> {
+  private async buildIncludeTreeChildren(path: string, database: string, includeName: string | undefined, includePath: string | undefined, includeScope: string | undefined, serializedItemPaths: Set<string>): Promise<IncludeTreeNodeWithChildrenDto[]> {
     const visitedPaths = new Set<string>();
     const children: SitecoreItem[] = await this.graphqlClient.getChildren(path);
-    return Promise.all(children.map((item: SitecoreItem) => this.buildIncludeTreeNode(item, database, includeName, includePath, includeScope, visitedPaths)));
+    return Promise.all(children.map((item: SitecoreItem) => this.buildIncludeTreeNode(item, database, includeName, includePath, includeScope, visitedPaths, serializedItemPaths)));
   }
 
   private async handleLoadIncludeTree(message: IncludeTreeLoadMessage): Promise<void> {
@@ -750,15 +776,17 @@ export class EditModulePanel {
 
     try {
       this.graphqlClient.setDatabase(database);
+      const serializedItemPaths = await this.loadSerializedItemPathsForModule();
+      this.includeSerializedPaths.set(includeId, serializedItemPaths);
       const includeRootItem = await this.graphqlClient.getItemByPath(includePath);
       let includeRootNode: IncludeTreeNodeWithChildrenDto | undefined;
       let children: IncludeTreeNodeWithChildrenDto[] = [];
 
       if (includeRootItem) {
-        includeRootNode = await this.buildIncludeTreeNode(includeRootItem, database, includeName, includePath, includeScope, new Set<string>());
+        includeRootNode = await this.buildIncludeTreeNode(includeRootItem, database, includeName, includePath, includeScope, new Set<string>(), serializedItemPaths);
       } else {
         // Fallback for paths that cannot be resolved as an item.
-        children = await this.buildIncludeTreeChildren(includePath, database, includeName, includePath, includeScope);
+        children = await this.buildIncludeTreeChildren(includePath, database, includeName, includePath, includeScope, serializedItemPaths);
       }
 
       const root: IncludeTreeNodeDto = {
@@ -820,6 +848,8 @@ export class EditModulePanel {
 
     try {
       this.graphqlClient.setDatabase(database);
+      const serializedItemPaths = this.includeSerializedPaths.get(includeId) ?? await this.loadSerializedItemPathsForModule();
+      this.includeSerializedPaths.set(includeId, serializedItemPaths);
       const children: SitecoreItem[] = await this.graphqlClient.getChildren(parentPath);
       console.log(`Tree children loaded for ${parentPath}: ${children.length} children`);
 
@@ -828,7 +858,7 @@ export class EditModulePanel {
         requestId,
         includeId,
         parentPath,
-        children: children.map(item => this.mapTreeNode(item, database, includeName, includePath, includeScope))
+        children: children.map(item => this.mapTreeNode(item, database, includeName, includePath, includeScope, serializedItemPaths.has(this.normalizePath(item.path))))
       });
     } catch (error) {
       console.error(`Error loading tree children for ${parentPath}:`, error);

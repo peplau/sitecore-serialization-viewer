@@ -9,6 +9,7 @@ export interface SitecoreItem {
   id: string;
   name: string;
   path: string;
+  iconUrl?: string;
   templateId?: string;
   templateName?: string;
   sortOrder?: number;

@@ -1,4 +1,8 @@
 import * as vscode from 'vscode';
+import { AuthoringGraphqlClient } from './sitecore/previewGraphqlClient';
+import { SerializationConfigService } from './sitecore/serializationConfigService';
+import { SitecoreItem, SerializationStatus } from './tree/models';
+import { Buffer } from 'buffer';
 
 interface RuleJson {
   path?: string;
@@ -89,10 +93,73 @@ interface ModuleSaveData {
   includes: IncludeFormData[];
 }
 
+interface IncludeTreeLoadMessage {
+  command: 'loadIncludeTree';
+  requestId: string;
+  includeId: string;
+  includePath: string;
+  includeName?: string;
+  includeScope?: string;
+  database?: string;
+}
+
+interface IncludeTreeChildrenMessage {
+  command: 'loadIncludeTreeChildren';
+  requestId: string;
+  includeId: string;
+  parentPath: string;
+  includePath?: string;
+  includeName?: string;
+  includeScope?: string;
+  database?: string;
+}
+
+interface IncludeRemoveRequestMessage {
+  command: 'requestRemoveInclude';
+  includeId: string;
+}
+
+interface OpenModuleJsonPathMessage {
+  command: 'openModuleJsonPath';
+}
+
+interface OpenExplainForPathMessage {
+  command: 'openExplainForPath';
+  path: string;
+  database?: string;
+  itemId?: string;
+}
+
+interface ResolveIconMessage {
+  command: 'resolveIcon';
+  iconUrl: string;
+}
+
+interface IncludeTreeNodeDto {
+  kind: 'database' | 'path' | 'item';
+  label: string;
+  path: string;
+  database: string;
+  hasChildren: boolean;
+  status: SerializationStatus;
+  yamlPath?: string;
+  iconUrl?: string;
+  itemId?: string;
+}
+
+interface IncludeTreeNodeWithChildrenDto extends IncludeTreeNodeDto {
+  children: IncludeTreeNodeWithChildrenDto[];
+}
+
+type WebviewMessage = { command: string; data?: ModuleSaveData } | IncludeTreeLoadMessage | IncludeTreeChildrenMessage | IncludeRemoveRequestMessage | OpenModuleJsonPathMessage | OpenExplainForPathMessage | ResolveIconMessage;
+
 export class EditModulePanel {
   private static readonly panels: Map<string, EditModulePanel> = new Map();
   private readonly panel: vscode.WebviewPanel;
   private readonly jsonFileUri: vscode.Uri;
+  private readonly graphqlClient = new AuthoringGraphqlClient();
+  private readonly iconCache = new Map<string, string>();
+  private static readonly iconCacheMaxSize = 200;
   private rawJson: ModuleFileJson = { namespace: '' };
   private pendingRevealIncludeName: string | undefined;
   private pendingRevealRulePath: string | undefined;
@@ -101,15 +168,144 @@ export class EditModulePanel {
     this.panel = panel;
     this.jsonFileUri = jsonFileUri;
 
-    this.panel.webview.onDidReceiveMessage(async (message: { command: string; data?: ModuleSaveData }) => {
-      if (message.command === 'saveModule' && message.data) {
+    this.panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+      if (this.isSaveModuleMessage(message) && message.data) {
         await this.saveModule(message.data);
+        return;
+      }
+
+      if (this.isLoadIncludeTreeMessage(message)) {
+        await this.handleLoadIncludeTree(message);
+        return;
+      }
+
+      if (this.isLoadIncludeTreeChildrenMessage(message)) {
+        await this.handleLoadIncludeTreeChildren(message);
+        return;
+      }
+
+      if (this.isRemoveIncludeRequestMessage(message)) {
+        await this.handleRemoveIncludeRequest(message);
+        return;
+      }
+
+      if (this.isOpenModuleJsonPathMessage(message)) {
+        await this.openCurrentModuleJson();
+        return;
+      }
+
+      if (this.isOpenExplainForPathMessage(message)) {
+        await this.openExplainForPath(message);
+        return;
+      }
+
+      if (this.isResolveIconMessage(message)) {
+        await this.handleResolveIcon(message);
+        return;
       }
     });
 
     this.panel.onDidDispose(() => {
       EditModulePanel.panels.delete(this.jsonFileUri.fsPath.toLowerCase());
     });
+  }
+
+  private isSaveModuleMessage(message: WebviewMessage): message is { command: 'saveModule'; data?: ModuleSaveData } {
+    return message.command === 'saveModule';
+  }
+
+  // Refine type guards for message handling
+  private isLoadIncludeTreeMessage(message: WebviewMessage): message is IncludeTreeLoadMessage {
+    return message.command === 'loadIncludeTree';
+  }
+
+  private isLoadIncludeTreeChildrenMessage(message: WebviewMessage): message is IncludeTreeChildrenMessage {
+    return message.command === 'loadIncludeTreeChildren';
+  }
+
+  private isRemoveIncludeRequestMessage(message: WebviewMessage): message is IncludeRemoveRequestMessage {
+    return message.command === 'requestRemoveInclude';
+  }
+
+  private isOpenModuleJsonPathMessage(message: WebviewMessage): message is OpenModuleJsonPathMessage {
+    return message.command === 'openModuleJsonPath';
+  }
+
+  private isOpenExplainForPathMessage(message: WebviewMessage): message is OpenExplainForPathMessage {
+    return message.command === 'openExplainForPath';
+  }
+
+  private isResolveIconMessage(message: WebviewMessage): message is ResolveIconMessage {
+    return message.command === 'resolveIcon';
+  }
+
+  private async handleResolveIcon(message: ResolveIconMessage): Promise<void> {
+    const { iconUrl } = message;
+    if (!iconUrl) {
+      return;
+    }
+
+    if (this.iconCache.has(iconUrl)) {
+      void this.panel.webview.postMessage({ command: 'iconResolved', iconUrl, dataUri: this.iconCache.get(iconUrl) });
+      return;
+    }
+
+    let dataUri = await this.graphqlClient.fetchIconAsDataUri(iconUrl);
+    if (!dataUri) {
+      const fallbackIconUrl = this.graphqlClient.getDefaultItemIconUrl();
+      if (fallbackIconUrl && fallbackIconUrl !== iconUrl) {
+        dataUri = await this.graphqlClient.fetchIconAsDataUri(fallbackIconUrl);
+      }
+    }
+
+    if (dataUri) {
+      if (this.iconCache.size >= EditModulePanel.iconCacheMaxSize) {
+        const firstKey = this.iconCache.keys().next().value;
+        if (firstKey !== undefined) {
+          this.iconCache.delete(firstKey);
+        }
+      }
+      this.iconCache.set(iconUrl, dataUri);
+    }
+
+    void this.panel.webview.postMessage({ command: 'iconResolved', iconUrl, dataUri: dataUri ?? null });
+  }
+
+  private async openCurrentModuleJson(): Promise<void> {
+    const document = await vscode.workspace.openTextDocument(this.jsonFileUri);
+    await vscode.window.showTextDocument(document, { preview: false });
+  }
+
+  private async openExplainForPath(message: OpenExplainForPathMessage): Promise<void> {
+    const itemPath = (message.path || '').trim();
+    const itemId = (message.itemId || '').trim();
+    if (!itemPath) {
+      return;
+    }
+
+    this.graphqlClient.setDatabase(this.normalizeDatabase(message.database));
+    let item = await this.graphqlClient.getItemByPath(itemPath);
+    if (!item && itemId) {
+      item = await this.graphqlClient.getItemById(itemId);
+    }
+    if (!item) {
+      vscode.window.showWarningMessage(`Unable to resolve item for explain: ${itemPath}`);
+      return;
+    }
+
+    await vscode.commands.executeCommand('sitecore-serialization-viewer.showDetails', item);
+  }
+
+  private async handleRemoveIncludeRequest(message: IncludeRemoveRequestMessage): Promise<void> {
+    const removeAction = await vscode.window.showWarningMessage(
+      'Are you sure you want to remove this include?',
+      { modal: true },
+      'Remove'
+    );
+
+    if (removeAction === 'Remove') {
+      void this.panel.webview.postMessage({ command: 'removeIncludeConfirmed', includeId: message.includeId });
+    }
   }
 
   public static async createOrShow(jsonFilePath: string, options?: { includeName?: string; rulePath?: string }): Promise<void> {
@@ -307,6 +503,345 @@ export class EditModulePanel {
     }
   }
 
+  private normalizeDatabase(database?: string): string {
+    return (database || '').trim() || 'master';
+  }
+
+  private getPathNodeLabel(pathValue: string): string {
+    const normalized = (pathValue || '').trim();
+    if (!normalized) {
+      return '/';
+    }
+
+    return normalized;
+  }
+
+  private normalizeIncludeName(includeName: string | undefined): string {
+    return (includeName || '').trim().toLowerCase();
+  }
+
+  private normalizePath(pathValue: string | undefined): string {
+    return (pathValue || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  }
+
+  private isPathInIncludeScope(itemPath: string | undefined, includePath: string | undefined, includeScope: string | undefined): boolean {
+    const normalizedItemPath = this.normalizePath(itemPath);
+    const normalizedIncludePath = this.normalizePath(includePath);
+
+    if (!normalizedItemPath || !normalizedIncludePath) {
+      return false;
+    }
+
+    if (normalizedItemPath === normalizedIncludePath) {
+      return true;
+    }
+
+    const normalizedScope = (includeScope || '').trim().toLowerCase();
+    if (normalizedScope === 'singleitem') {
+      return false;
+    }
+
+    // Keep behavior aligned with SerializationConfigService scope handling.
+    if (normalizedScope === 'itemandchildren' || normalizedScope === 'itemanddescendants' || normalizedScope === 'descendantsonly' || normalizedScope === '') {
+      return normalizedItemPath.startsWith(normalizedIncludePath + '/');
+    }
+
+    return false;
+  }
+
+  private getIncludeScopedStatus(item: SitecoreItem, includePath?: string, includeScope?: string): SerializationStatus {
+    const normalizedIncludePath = this.normalizePath(includePath);
+    if (!normalizedIncludePath) {
+      return item.status;
+    }
+
+    const normalizedItemPath = this.normalizePath(item.path);
+    const normalizedScope = (includeScope || '').trim().toLowerCase();
+
+    if (normalizedItemPath === normalizedIncludePath) {
+      // DescendantsOnly: root path itself is NOT serialized
+      if (normalizedScope === 'descendantsonly') {
+        return SerializationStatus.NotSerialized;
+      }
+      return SerializationStatus.Direct;
+    }
+
+    const suffix = normalizedItemPath.slice(normalizedIncludePath.length);
+    const isDescendant = suffix.startsWith('/');
+    if (!isDescendant) {
+      return SerializationStatus.NotSerialized;
+    }
+
+    if (normalizedScope === 'singleitem' || normalizedScope === 'ignored') {
+      return SerializationStatus.NotSerialized;
+    }
+
+    // ItemAndChildren: only direct children (suffix has exactly one more path segment)
+    if (normalizedScope === 'itemandchildren') {
+      const isDirectChild = !suffix.slice(1).includes('/');
+      return isDirectChild ? SerializationStatus.Indirect : SerializationStatus.NotSerialized;
+    }
+
+    // DescendantsOnly: root itself is not serialized, descendants are
+    if (normalizedScope === 'descendantsonly') {
+      return SerializationStatus.Indirect;
+    }
+
+    // ItemAndDescendants (or empty/default): all descendants are indirect
+    return SerializationStatus.Indirect;
+  }
+
+  private isItemSerializedByInclude(item: SitecoreItem, includeName: string | undefined, includePath?: string, includeDatabase?: string, includeScope?: string): boolean {
+    if (this.getIncludeScopedStatus(item, includePath, includeScope) !== SerializationStatus.NotSerialized) {
+      return true;
+    }
+
+    if (item.status !== SerializationStatus.Direct && item.status !== SerializationStatus.Indirect) {
+      return false;
+    }
+
+    const normalizedIncludeName = this.normalizeIncludeName(includeName);
+    const normalizedIncludePath = this.normalizePath(includePath);
+    if (!normalizedIncludeName && !normalizedIncludePath) {
+      return item.status === SerializationStatus.Direct || item.status === SerializationStatus.Indirect;
+    }
+
+    const serializationService = SerializationConfigService.getInstance();
+
+    if (item.matchedModule && normalizedIncludeName) {
+      const includeInfo = serializationService.getIncludeInfo(item.matchedModule, includeName);
+      const includeDb = (includeInfo?.database || '').trim().toLowerCase();
+      const selectedDb = (includeDatabase || '').trim().toLowerCase();
+      const dbMatches = !includeDb || !selectedDb || includeDb === selectedDb;
+      if (dbMatches && includeInfo && this.isPathInIncludeScope(item.path, includeInfo.path, includeInfo.scope)) {
+        return true;
+      }
+    }
+
+    if (normalizedIncludePath && this.isPathInIncludeScope(item.path, includePath, item.subtreeScope)) {
+      const normalizedSubtreePath = this.normalizePath(item.subtreePath);
+      if (!normalizedSubtreePath || normalizedSubtreePath === normalizedIncludePath) {
+        return true;
+      }
+    }
+
+    const inferredFromYaml = serializationService.inferIncludeFromYamlPath(item.yamlPath);
+    const normalizedSubtreeKey = this.normalizeIncludeName(item.subtreeKey);
+    const normalizedInferredInclude = this.normalizeIncludeName(inferredFromYaml);
+
+    return normalizedSubtreeKey === normalizedIncludeName || normalizedInferredInclude === normalizedIncludeName;
+  }
+
+  private mapTreeNode(item: SitecoreItem, database: string, includeName?: string, includePath?: string, includeScope?: string): IncludeTreeNodeDto {
+    let includeScopedStatus: SerializationStatus;
+
+    if (includePath) {
+      // Include path is known: only color if item was enriched (in this module's includes)
+      if (item.yamlPath) {
+        // Item is in this module's includes → use scope calculation
+        includeScopedStatus = this.getIncludeScopedStatus(item, includePath, includeScope);
+      } else {
+        // Item is not in this module's includes yet → gray
+        includeScopedStatus = SerializationStatus.NotSerialized;
+      }
+    } else {
+      // No include path available – fall back to name/yaml-inference matching.
+      includeScopedStatus = this.isItemSerializedByInclude(item, includeName, includePath, database, includeScope)
+        ? item.status
+        : SerializationStatus.NotSerialized;
+    }
+
+    return {
+      kind: 'item',
+      label: item.name,
+      path: item.path,
+      database,
+      hasChildren: item.hasChildren,
+      status: includeScopedStatus,
+      yamlPath: item.yamlPath,
+      iconUrl: item.iconUrl,
+      itemId: item.id
+    };
+  }
+
+  private async buildIncludeTreeNode(
+    item: SitecoreItem,
+    database: string,
+    includeName: string | undefined,
+    includePath: string | undefined,
+    includeScope: string | undefined,
+    visitedPaths: Set<string>
+  ): Promise<IncludeTreeNodeWithChildrenDto> {
+    // Enrich item only if it's in this module's includes list
+    const includes = Array.isArray(this.rawJson.items?.includes) ? this.rawJson.items.includes : [];
+    const normalizedItemPath = this.normalizePath(item.path);
+    
+    for (const inc of includes) {
+      const normalizedIncludePath = this.normalizePath(inc.path);
+      if (normalizedItemPath === normalizedIncludePath || 
+          normalizedItemPath.startsWith(normalizedIncludePath + '/')) {
+        // Item is in THIS module's includes → enrich from config
+        const configService = SerializationConfigService.getInstance();
+        const match = configService.checkSerializationStatus(item.path);
+        if (match) {
+          item.status = match.status;
+          item.matchedModule = match.moduleName;
+          item.yamlPath = match.yamlPath;
+        }
+        break;
+      }
+    }
+
+    const node = this.mapTreeNode(item, database, includeName, includePath, includeScope);
+    const normalizedPath = item.path.toLowerCase();
+
+    if (visitedPaths.has(normalizedPath)) {
+      return {
+        ...node,
+        hasChildren: false,
+        children: []
+      };
+    }
+
+    visitedPaths.add(normalizedPath);
+
+    let children: IncludeTreeNodeWithChildrenDto[] = [];
+    if (item.hasChildren) {
+      try {
+        const rawChildren: SitecoreItem[] = await this.graphqlClient.getChildren(item.path);
+        children = await Promise.all(rawChildren.map((child: SitecoreItem) => this.buildIncludeTreeNode(child, database, includeName, includePath, includeScope, visitedPaths)));
+      } catch (error) {
+        // Keep rendering the rest of the tree if a single branch cannot be expanded.
+        console.warn(`Unable to load children for ${item.path}:`, error);
+        children = [];
+      }
+    }
+
+    return {
+      ...node,
+      hasChildren: children.length > 0,
+      children
+    };
+  }
+
+  private async buildIncludeTreeChildren(path: string, database: string, includeName: string | undefined, includePath?: string, includeScope?: string): Promise<IncludeTreeNodeWithChildrenDto[]> {
+    const visitedPaths = new Set<string>();
+    const children: SitecoreItem[] = await this.graphqlClient.getChildren(path);
+    return Promise.all(children.map((item: SitecoreItem) => this.buildIncludeTreeNode(item, database, includeName, includePath, includeScope, visitedPaths)));
+  }
+
+  private async handleLoadIncludeTree(message: IncludeTreeLoadMessage): Promise<void> {
+    const requestId = message.requestId;
+    const includeId = message.includeId;
+    const includePath = (message.includePath || '').trim();
+    const includeName = (message.includeName || '').trim();
+    const includeScope = (message.includeScope || '').trim();
+    const database = this.normalizeDatabase(message.database);
+
+    if (!includePath) {
+      void this.panel.webview.postMessage({
+        command: 'includeTreeLoaded',
+        requestId,
+        includeId,
+        error: 'Include path is required.'
+      });
+      return;
+    }
+
+    try {
+      this.graphqlClient.setDatabase(database);
+      const includeRootItem = await this.graphqlClient.getItemByPath(includePath);
+      let includeRootNode: IncludeTreeNodeWithChildrenDto | undefined;
+      let children: IncludeTreeNodeWithChildrenDto[] = [];
+
+      if (includeRootItem) {
+        includeRootNode = await this.buildIncludeTreeNode(includeRootItem, database, includeName, includePath, includeScope, new Set<string>());
+      } else {
+        // Fallback for paths that cannot be resolved as an item.
+        children = await this.buildIncludeTreeChildren(includePath, database, includeName, includePath, includeScope);
+      }
+
+      const root: IncludeTreeNodeDto = {
+        kind: 'database',
+        label: database,
+        path: `db:${database}`,
+        database,
+        hasChildren: true,
+        status: SerializationStatus.NotSerialized
+      };
+
+      const includePathNode: IncludeTreeNodeDto = {
+        kind: 'path',
+        label: this.getPathNodeLabel(includePath),
+        path: includePath,
+        database,
+        hasChildren: true,
+        status: SerializationStatus.NotSerialized
+      };
+
+      void this.panel.webview.postMessage({
+        command: 'includeTreeLoaded',
+        requestId,
+        includeId,
+        root,
+        includePathNode,
+        includeRootNode,
+        children
+      });
+    } catch (error) {
+      void this.panel.webview.postMessage({
+        command: 'includeTreeLoaded',
+        requestId,
+        includeId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  private async handleLoadIncludeTreeChildren(message: IncludeTreeChildrenMessage): Promise<void> {
+    const requestId = message.requestId;
+    const includeId = message.includeId;
+    const parentPath = (message.parentPath || '').trim();
+    const includePath = (message.includePath || '').trim();
+    const includeName = (message.includeName || '').trim();
+    const includeScope = (message.includeScope || '').trim();
+    const database = this.normalizeDatabase(message.database);
+
+    if (!parentPath) {
+      void this.panel.webview.postMessage({
+        command: 'includeTreeChildrenLoaded',
+        requestId,
+        includeId,
+        parentPath,
+        children: []
+      });
+      return;
+    }
+
+    try {
+      this.graphqlClient.setDatabase(database);
+      const children: SitecoreItem[] = await this.graphqlClient.getChildren(parentPath);
+      console.log(`Tree children loaded for ${parentPath}: ${children.length} children`);
+
+      void this.panel.webview.postMessage({
+        command: 'includeTreeChildrenLoaded',
+        requestId,
+        includeId,
+        parentPath,
+        children: children.map(item => this.mapTreeNode(item, database, includeName, includePath, includeScope))
+      });
+    } catch (error) {
+      console.error(`Error loading tree children for ${parentPath}:`, error);
+      void this.panel.webview.postMessage({
+        command: 'includeTreeChildrenLoaded',
+        requestId,
+        includeId,
+        parentPath,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
   private esc(value: unknown): string {
     return String(value ?? '')
       .replace(/&/g, '&amp;')
@@ -346,6 +881,7 @@ export class EditModulePanel {
         description: field.description ?? ''
       })),
       includes: includes.map(inc => ({
+        isSaved: true,
         name: inc.name ?? '',
         path: inc.path ?? '',
         database: inc.database ?? '',
@@ -365,6 +901,7 @@ export class EditModulePanel {
   private buildHtml(): string {
     const initialRevealIncludeNameJson = JSON.stringify(this.pendingRevealIncludeName ?? '');
     const initialRevealRulePathJson = JSON.stringify(this.pendingRevealRulePath ?? '');
+    const moduleJsonPathEscaped = this.esc(this.jsonFileUri.fsPath);
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -439,20 +976,40 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
   margin-bottom: 14px;
 }
 .include-block {
+  margin-bottom: 14px;
+}
+.include-group {
   background: var(--card-bg);
   border: 1px solid var(--card-border);
   border-radius: 12px;
+}
+.include-card {
+  background: transparent;
+  border: none;
+  border-radius: 0;
   padding: 0;
-  margin-bottom: 14px;
 }
 .include-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   margin-bottom: 0;
   padding: 10px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--card-border) 60%, transparent);
+  gap: 12px;
+}
+.include-title-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+.include-drag-handle {
   cursor: grab;
+}
+.include-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .include-label {
   font-size: 12px;
@@ -460,6 +1017,17 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
+}
+.include-quick-info {
+  display: none;
+  font-size: 0.85rem;
+  color: var(--vscode-descriptionForeground, #999);
+  margin-top: 4px;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.include-block.collapsed .include-quick-info {
+  display: block;
 }
 .rules-section { margin-top: 20px; }
 .rules-header {
@@ -691,16 +1259,44 @@ button { cursor: pointer; font: inherit; }
   align-items: center;
   gap: 12px;
 }
+.include-tree-controls {
+  display: none;
+}
+.include-tree-bar {
+  display: flex;
+  align-items: center;
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  background: var(--vscode-editor-background);
+  border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  border-radius: 10px;
+}
+.include-tree-bar.is-open {
+  display: block;
+  padding: 10px 12px 12px;
+}
+.include-tree-bar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
 .include-content {
   padding: 14px;
 }
 .include-block.dragging {
   opacity: 0.65;
 }
-.include-block.drop-before {
+.include-block.drop-before .include-card {
   box-shadow: inset 0 3px 0 0 var(--accent);
 }
-.include-block.drop-after {
+.include-block.drop-after .include-card {
+  box-shadow: inset 0 -3px 0 0 var(--accent);
+}
+.include-block.drop-before .include-group {
+  box-shadow: inset 0 3px 0 0 var(--accent);
+}
+.include-block.drop-after .include-group {
   box-shadow: inset 0 -3px 0 0 var(--accent);
 }
 .excluded-fields-card {
@@ -756,10 +1352,191 @@ button { cursor: pointer; font: inherit; }
   font-size: 11px;
   line-height: 1.4;
 }
+.include-tree-toggle {
+  align-items: center;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, transparent);
+  border-radius: 6px;
+  color: var(--danger);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  height: auto;
+  justify-content: center;
+  padding: 4px 10px;
+  transition: background-color 120ms ease, color 120ms ease;
+  width: auto;
+}
+.include-tree-toggle:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.include-tree-toggle.is-active {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+.include-tree-toggle-icon {
+  height: 12px;
+  width: 12px;
+}
+.include-tree-panel {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  margin: 0;
+  padding: 0;
+}
+.include-tree-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-start;
+  margin-bottom: 8px;
+}
+.include-tree-refresh {
+  text-align: left;
+  width: auto;
+}
+.include-tree-root {
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  border: 1px solid color-mix(in srgb, var(--vscode-sideBar-border, var(--border)) 70%, transparent);
+  border-radius: 8px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 8px;
+}
+.include-tree-list {
+  list-style: none;
+  margin: 0;
+  padding-left: 16px;
+}
+.include-tree-list.root-level {
+  padding-left: 0;
+}
+.include-tree-node {
+  margin: 0;
+}
+.include-tree-node-row {
+  align-items: center;
+  display: flex;
+  gap: 5px;
+  min-height: 22px;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.include-tree-node-row:hover {
+  background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.06));
+}
+.include-tree-node-toggle {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--vscode-icon-foreground, var(--text));
+  cursor: pointer;
+  font-size: 11px;
+  height: 16px;
+  line-height: 1;
+  padding: 0;
+  width: 16px;
+}
+.include-tree-node-spacer {
+  display: inline-block;
+  height: 16px;
+  width: 16px;
+}
+.include-tree-node-label {
+  align-items: center;
+  color: var(--vscode-list-foreground, var(--text));
+  display: inline-flex;
+  font-size: 13px;
+  gap: 5px;
+}
+.include-tree-node-label.is-clickable {
+  cursor: pointer;
+}
+.include-tree-node-label.is-clickable:hover {
+  text-decoration: underline;
+}
+.include-tree-node-icon-wrap {
+  align-items: center;
+  display: inline-flex;
+  height: 16px;
+  justify-content: center;
+  width: 16px;
+}
+.include-tree-node-icon {
+  height: 16px;
+  width: 16px;
+}
+.include-tree-node-sitecore-icon {
+  display: block;
+  height: 16px;
+  width: 16px;
+}
+.include-tree-node-label.status-direct,
+.include-tree-node-label.status-indirect,
+.include-tree-node-label.status-untracked,
+.include-tree-node-label.status-not-serialized,
+.include-tree-node-label.status-loading,
+.include-tree-node-label.node-kind-database,
+.include-tree-node-label.node-kind-path {
+  color: var(--vscode-list-foreground, var(--text));
+}
+.include-tree-node-icon-wrap .include-tree-node-icon {
+  color: var(--vscode-symbolIcon-folderForeground, var(--vscode-list-foreground, var(--text)));
+}
+.include-tree-node-icon-wrap.status-direct .include-tree-node-icon {
+  color: var(--vscode-charts-orange, #ce9178);
+}
+.include-tree-node-icon-wrap.status-indirect .include-tree-node-icon {
+  color: var(--vscode-charts-yellow, #dcdcaa);
+}
+.include-tree-node-icon-wrap.status-not-serialized .include-tree-node-sitecore-icon,
+.include-tree-node-icon-wrap.status-untracked .include-tree-node-sitecore-icon,
+.include-tree-node-icon-wrap.status-loading .include-tree-node-sitecore-icon {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+.include-tree-node-icon-wrap.status-untracked .include-tree-node-icon,
+.include-tree-node-icon-wrap.status-not-serialized .include-tree-node-icon,
+.include-tree-node-icon-wrap.status-loading .include-tree-node-icon {
+  color: var(--vscode-disabledForeground, #8c8c8c);
+}
+.include-tree-node-label.node-kind-item.status-not-serialized,
+.include-tree-node-label.node-kind-item.status-untracked,
+.include-tree-node-label.node-kind-item.status-loading {
+  color: var(--vscode-disabledForeground, #8c8c8c);
+}
+.include-tree-node-icon-wrap.node-kind-path .include-tree-node-icon {
+  color: var(--vscode-charts-orange, #ce9178);
+}
+.include-tree-node-icon-wrap.node-kind-database .include-tree-node-icon {
+  color: var(--vscode-testing-iconPassed, #73c991);
+}
+.include-tree-root-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 0;
+}
+.module-json-path-wrap {
+  margin: -12px 0 16px;
+}
+.module-json-path-link {
+  color: var(--vscode-textLink-foreground, #3794ff);
+  cursor: pointer;
+  text-decoration: none;
+  word-break: break-all;
+}
+.module-json-path-link:hover {
+  text-decoration: underline;
+}
 </style>
 </head>
 <body>
 <h1>Edit Module: <span id="title-ns">${this.esc(this.rawJson.namespace ?? '')}</span></h1>
+<div class="module-json-path-wrap">
+  <a href="#" id="module-json-path-link" class="module-json-path-link">${moduleJsonPathEscaped}</a>
+</div>
 
 <nav class="nav-links">
   <div class="nav-links-left">
@@ -843,6 +1620,352 @@ button { cursor: pointer; font: inherit; }
   data.excludedFields = Array.isArray(data.excludedFields) ? data.excludedFields : [];
   let idCounter = data.includes.length;
   let draggedInclude = null;
+  let includeTreeRequestCounter = 0;
+  var resolvedIconCache = new Map(); // iconUrl -> dataUri or 'pending'
+
+  function nextIncludeTreeRequestId() {
+    includeTreeRequestCounter += 1;
+    return 'include-tree-' + includeTreeRequestCounter;
+  }
+
+  function getStatusClass(node) {
+    if (!node || !node.status) {
+      return 'status-not-serialized';
+    }
+
+    if (node.status === 'direct') {
+      return 'status-direct';
+    }
+
+    if (node.status === 'indirect') {
+      return 'status-indirect';
+    }
+
+    if (node.status === 'untracked') {
+      return 'status-untracked';
+    }
+
+    return 'status-not-serialized';
+  }
+
+  function getNodeIconMarkup(node) {
+    if (node.kind === 'database') {
+      return '<svg viewBox="0 0 16 16" class="include-tree-node-icon" aria-hidden="true"><ellipse cx="8" cy="3" rx="4.5" ry="1.8" fill="none" stroke="currentColor" stroke-width="1.2"></ellipse><path d="M3.5 3V6.2C3.5 7.2 5.5 8 8 8C10.5 8 12.5 7.2 12.5 6.2V3" fill="none" stroke="currentColor" stroke-width="1.2"></path><ellipse cx="8" cy="8" rx="4.5" ry="1.8" fill="none" stroke="currentColor" stroke-width="1.2"></ellipse><path d="M3.5 8V11.2C3.5 12.2 5.5 13 8 13C10.5 13 12.5 12.2 12.5 11.2V8" fill="none" stroke="currentColor" stroke-width="1.2"></path><ellipse cx="8" cy="13" rx="4.5" ry="1.8" fill="none" stroke="currentColor" stroke-width="1.2"></ellipse></svg>';
+    }
+
+    if (node.kind === 'item' && node.iconUrl) {
+      return '<img data-icon-url="' + esc(node.iconUrl) + '" class="include-tree-node-sitecore-icon" alt="">';
+    }
+
+    var isFolder = node.kind === 'database' || node.kind === 'path' || !!node.hasChildren;
+    if (isFolder) {
+      return '<svg viewBox="0 0 16 16" class="include-tree-node-icon icon-folder" aria-hidden="true"><path d="M1.5 4H6L7.4 5.5H14.5V12.5H1.5V4Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"></path></svg>';
+    }
+
+    return '<svg viewBox="0 0 16 16" class="include-tree-node-icon icon-file" aria-hidden="true"><path d="M3 1.5H9.7L13 4.8V14.5H3V1.5Z" fill="none" stroke="currentColor" stroke-width="1.2"></path><path d="M9.7 1.5V4.8H13" fill="none" stroke="currentColor" stroke-width="1.2"></path></svg>';
+  }
+
+  function createNodeElement(node, includeId, database, expandedByDefault) {
+    var li = document.createElement('li');
+    li.className = 'include-tree-node';
+    li.dataset.nodePath = node.path;
+    li.dataset.nodeId = node.itemId || '';
+    li.dataset.nodeKind = node.kind;
+    li.dataset.hasChildren = node.hasChildren ? 'true' : 'false';
+    li.dataset.includeId = includeId;
+    li.dataset.database = database;
+    var hasPreloadedChildren = Array.isArray(node.children);
+    li.dataset.loadedChildren = hasPreloadedChildren || expandedByDefault ? 'true' : 'false';
+
+    var row = document.createElement('div');
+    row.className = 'include-tree-node-row';
+
+    if (node.hasChildren) {
+      var toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'include-tree-node-toggle';
+      toggle.textContent = expandedByDefault ? '▾' : '▸';
+      toggle.setAttribute('aria-label', expandedByDefault ? 'Collapse tree node' : 'Expand tree node');
+      row.appendChild(toggle);
+    } else {
+      var spacer = document.createElement('span');
+      spacer.className = 'include-tree-node-spacer';
+      row.appendChild(spacer);
+    }
+
+    var statusClass = getStatusClass(node);
+    var label = document.createElement('span');
+    label.className = 'include-tree-node-label ' + statusClass + ' node-kind-' + node.kind;
+    label.innerHTML = '<span class="include-tree-node-icon-wrap ' + statusClass + ' node-kind-' + node.kind + '">' + getNodeIconMarkup(node) + '</span><span>' + esc(node.label) + '</span>';
+    if (node.kind === 'item') {
+      label.classList.add('is-clickable');
+      label.title = 'Open Explain';
+    }
+    row.appendChild(label);
+    li.appendChild(row);
+
+    if (node.hasChildren) {
+      var childrenList = document.createElement('ul');
+      childrenList.className = 'include-tree-list';
+      if (!expandedByDefault) {
+        childrenList.hidden = true;
+      }
+
+      if (hasPreloadedChildren) {
+        node.children.forEach(function(childNode) {
+          childrenList.appendChild(createNodeElement(childNode, includeId, database, expandedByDefault));
+        });
+      }
+
+      li.appendChild(childrenList);
+    }
+
+    if (node.kind === 'item' && node.iconUrl) {
+      var cachedDataUri = resolvedIconCache.get(node.iconUrl);
+      if (cachedDataUri && cachedDataUri !== 'pending') {
+        var imgEl = li.querySelector('.include-tree-node-sitecore-icon[data-icon-url]');
+        if (imgEl) {
+          imgEl.src = cachedDataUri;
+        }
+      } else if (!cachedDataUri) {
+        resolvedIconCache.set(node.iconUrl, 'pending');
+        vscode.postMessage({ command: 'resolveIcon', iconUrl: node.iconUrl });
+      }
+    }
+
+    return li;
+  }
+
+  function setIncludeTreeStatus(panel, text, isError) {
+    if (!panel) {
+      return;
+    }
+
+    var statusEl = panel.querySelector('.include-tree-status');
+    if (!statusEl) {
+      return;
+    }
+
+    statusEl.textContent = text;
+    statusEl.style.color = isError ? 'var(--danger)' : '';
+  }
+
+  function getIncludeBlockById(includeId) {
+    return document.querySelector('.include-block[data-id="' + includeId + '"]');
+  }
+
+  function getIncludeTreePanel(includeBlock) {
+    return includeBlock ? includeBlock.querySelector('.include-tree-panel') : null;
+  }
+
+  function getIncludeTreeBar(includeBlock) {
+    return includeBlock ? includeBlock.querySelector('.include-tree-bar') : null;
+  }
+
+  function getIncludeTreeRoot(includePanel) {
+    return includePanel ? includePanel.querySelector('.include-tree-root') : null;
+  }
+
+  function loadIncludeTree(includeBlock, forceRefresh) {
+    if (!includeBlock) {
+      return;
+    }
+
+    var panel = getIncludeTreePanel(includeBlock);
+    if (!panel) {
+      return;
+    }
+
+    var includePathInput = includeBlock.querySelector('.inc-path');
+    var includeNameInput = includeBlock.querySelector('.inc-name');
+    var includeScopeSelect = includeBlock.querySelector('.inc-scope');
+    var includeDbSelect = includeBlock.querySelector('.inc-database');
+    var includeId = includeBlock.getAttribute('data-id') || '';
+    var includePath = includePathInput ? String(includePathInput.value || '').trim() : '';
+    var includeName = includeNameInput ? String(includeNameInput.value || '').trim() : '';
+    var includeScope = includeScopeSelect ? String(includeScopeSelect.value || '').trim() : '';
+    var includeDatabase = includeDbSelect ? String(includeDbSelect.value || '').trim() : '';
+    var database = includeDatabase || 'master';
+
+    if (!includePath) {
+      var rootMissingPath = getIncludeTreeRoot(panel);
+      if (rootMissingPath) {
+        rootMissingPath.innerHTML = '<div class="include-tree-root-empty">Include path is required to build the tree.</div>';
+      }
+      setIncludeTreeStatus(panel, 'Cannot load tree until include path is set.', true);
+      return;
+    }
+
+    if (!forceRefresh && panel.dataset.loaded === 'true') {
+      return;
+    }
+
+    var requestId = nextIncludeTreeRequestId();
+    panel.dataset.requestId = requestId;
+    panel.dataset.loaded = 'false';
+
+    var root = getIncludeTreeRoot(panel);
+    if (root) {
+      root.innerHTML = '<div class="include-tree-root-empty">Loading tree...</div>';
+    }
+
+    vscode.postMessage({
+      command: 'loadIncludeTree',
+      requestId: requestId,
+      includeId: includeId,
+      includePath: includePath,
+      includeName: includeName,
+      includeScope: includeScope,
+      database: database
+    });
+  }
+
+  function loadIncludeTreeChildren(includeBlock, nodeElement) {
+    if (!includeBlock || !nodeElement) {
+      return;
+    }
+
+    if (nodeElement.dataset.loadedChildren === 'true') {
+      return;
+    }
+
+    var panel = getIncludeTreePanel(includeBlock);
+    if (!panel) {
+      return;
+    }
+
+    var includeId = includeBlock.getAttribute('data-id') || '';
+    var includePathInput = includeBlock.querySelector('.inc-path');
+    var includeNameInput = includeBlock.querySelector('.inc-name');
+    var includeScopeSelect = includeBlock.querySelector('.inc-scope');
+    var includePath = includePathInput ? String(includePathInput.value || '').trim() : '';
+    var includeName = includeNameInput ? String(includeNameInput.value || '').trim() : '';
+    var includeScope = includeScopeSelect ? String(includeScopeSelect.value || '').trim() : '';
+    var parentPath = nodeElement.dataset.nodePath || '';
+    var database = nodeElement.dataset.database || 'master';
+    var requestId = nextIncludeTreeRequestId();
+    nodeElement.dataset.childrenRequestId = requestId;
+
+    var childrenList = nodeElement.querySelector(':scope > .include-tree-list');
+    if (childrenList) {
+      childrenList.innerHTML = '<li class="include-tree-node"><div class="include-tree-node-row"><span class="include-tree-node-spacer"></span><span class="include-tree-node-label status-loading">Loading...</span></div></li>';
+    }
+
+    vscode.postMessage({
+      command: 'loadIncludeTreeChildren',
+      requestId: requestId,
+      includeId: includeId,
+      parentPath: parentPath,
+      includePath: includePath,
+      includeName: includeName,
+      includeScope: includeScope,
+      database: database
+    });
+  }
+
+  function renderIncludeTree(includeId, payload) {
+    var includeBlock = getIncludeBlockById(includeId);
+    if (!includeBlock) {
+      return;
+    }
+
+    var panel = getIncludeTreePanel(includeBlock);
+    if (!panel) {
+      return;
+    }
+
+    if (panel.dataset.requestId !== payload.requestId) {
+      return;
+    }
+
+    var root = getIncludeTreeRoot(panel);
+    if (!root) {
+      return;
+    }
+
+    if (payload.error) {
+      root.innerHTML = '<div class="include-tree-root-empty">Unable to load tree: ' + esc(payload.error) + '</div>';
+      setIncludeTreeStatus(panel, payload.error, true);
+      return;
+    }
+
+    root.innerHTML = '';
+    var rootList = document.createElement('ul');
+    rootList.className = 'include-tree-list root-level';
+    var dbNode = createNodeElement(payload.root, includeId, payload.root.database, true);
+    var dbChildrenList = dbNode.querySelector(':scope > .include-tree-list');
+
+    if (dbChildrenList) {
+      if (payload.includeRootNode) {
+        dbChildrenList.appendChild(createNodeElement(payload.includeRootNode, includeId, payload.root.database, true));
+      } else {
+        var childNodes = Array.isArray(payload.children) ? payload.children : [];
+        if (childNodes.length > 0) {
+          childNodes.forEach(function(childNode) {
+            dbChildrenList.appendChild(createNodeElement(childNode, includeId, payload.root.database, true));
+          });
+        }
+      }
+    }
+
+    rootList.appendChild(dbNode);
+    root.appendChild(rootList);
+    panel.dataset.loaded = 'true';
+  }
+
+  function renderIncludeTreeChildren(includeId, payload) {
+    var includeBlock = getIncludeBlockById(includeId);
+    if (!includeBlock) {
+      return;
+    }
+
+    var nodeElement = null;
+    includeBlock.querySelectorAll('.include-tree-node').forEach(function(candidate) {
+      if (!nodeElement && candidate.dataset.nodePath === payload.parentPath) {
+        nodeElement = candidate;
+      }
+    });
+    if (!nodeElement) {
+      return;
+    }
+
+    if (nodeElement.dataset.childrenRequestId !== payload.requestId) {
+      return;
+    }
+
+    var panel = getIncludeTreePanel(includeBlock);
+    var childrenList = nodeElement.querySelector(':scope > .include-tree-list');
+    if (!childrenList) {
+      return;
+    }
+
+    if (payload.error) {
+      childrenList.innerHTML = '<li class="include-tree-node"><div class="include-tree-node-row"><span class="include-tree-node-spacer"></span><span class="include-tree-node-label status-not-serialized">Error: Unable to load children.</span></div></li>';
+      if (panel) {
+        setIncludeTreeStatus(panel, 'Error loading children for ' + payload.parentPath + ': ' + payload.error, true);
+      }
+      console.warn('Tree children error for ' + payload.parentPath + ':', payload.error);
+      return;
+    }
+
+    childrenList.innerHTML = '';
+    var childNodes = Array.isArray(payload.children) ? payload.children : [];
+    if (childNodes.length > 0) {
+      var database = nodeElement.dataset.database || 'master';
+      childNodes.forEach(function(childNode) {
+        childrenList.appendChild(createNodeElement(childNode, includeId, database, false));
+      });
+    } else {
+      // No children returned - could be expected (empty folder) or could indicate a problem
+      childrenList.innerHTML = '<li class="include-tree-node"><div class="include-tree-node-row"><span class="include-tree-node-spacer"></span><span class="include-tree-node-label status-not-serialized">(No children)</span></div></li>';
+      console.log('No children returned for ' + payload.parentPath);
+    }
+
+    nodeElement.dataset.loadedChildren = 'true';
+    if (panel) {
+      setIncludeTreeStatus(panel, 'Tree updated.', false);
+    }
+  }
 
   function esc(str) {
     return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -920,57 +2043,98 @@ button { cursor: pointer; font: inherit; }
       '<option value="core"' + (inc.database === 'core' ? ' selected' : '') + '>core</option>';
 
     var rulesHtml = (inc.rules || []).map(ruleHtml).join('');
+    var showTreeToggle = !!inc.isSaved;
+    var treeToggleHtml = showTreeToggle
+      ? '<button type="button" class="include-tree-toggle" title="Show include content tree" aria-pressed="false">' +
+          '<svg class="include-tree-toggle-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+            '<circle cx="4" cy="3" r="1.5" fill="currentColor"></circle>' +
+            '<circle cx="12" cy="8" r="1.5" fill="currentColor"></circle>' +
+            '<circle cx="4" cy="13" r="1.5" fill="currentColor"></circle>' +
+            '<path d="M5.5 3H8.5V8H10.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></path>' +
+            '<path d="M5.5 13H8.5V8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></path>' +
+          '</svg>' +
+          '<span>Show Tree</span>' +
+        '</button>'
+      : '';
 
-      return '<div class="include-block collapsed" data-id="' + id + '" data-include-name="' + esc(inc.name || '') + '">' +
-        '<div class="include-header include-drag-handle" draggable="true">' +
-          '<div class="include-title-row">' +
-            '<button type="button" class="include-toggle">▶</button>' +
-            '<span class="include-name-display">' + esc(inc.name || '(Unnamed)') + '</span>' +
+    var treePanelHtml = showTreeToggle
+      ? '<div class="include-tree-bar">' +
+          treeToggleHtml +
+        '</div>'
+      : '';
+
+    var treeControlsHtml = ''; // kept for backward compat, no longer used in markup
+
+      return '<div class="include-block collapsed" data-id="' + id + '" data-include-name="' + esc(inc.name || '') + '" data-scope="' + esc(inc.scope || '') + '" data-path="' + esc(inc.path || '') + '" data-database="' + esc(inc.database || '') + '">' +
+        '<div class="include-group">' +
+          '<div class="include-card">' +
+            '<div class="include-header">' +
+              '<div class="include-title-section include-drag-handle" draggable="true">' +
+                '<div class="include-title-row">' +
+                  '<button type="button" class="include-toggle">▶</button>' +
+                  '<span class="include-name-display">' + esc(inc.name || '(Unnamed)') + '</span>' +
+                '</div>' +
+                '<div class="include-quick-info">' + getIncludeQuickInfoText(inc.scope, inc.path, inc.database) + '</div>' +
+              '</div>' +
+              '<div class="include-actions-row">' +
+                '<button type="button" class="scroll-to-top" title="Scroll to top">Scroll to the top</button>' +
+                '<button type="button" class="btn-danger-sm btn-remove-include">Remove Include</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="include-content">' +
+        '<div class="fields-grid">' +
+          '<div class="field span-2">' +
+            '<label>Name<span class="req">*</span></label>' +
+            '<input class="inc-name" type="text" value="' + esc(inc.name) + '" required placeholder="e.g. Templates.Feature.Module.Name">' +
           '</div>' +
-          '<div class="include-actions-row">' +
-            '<button type="button" class="scroll-to-top" title="Scroll to top">Scroll to the top</button>' +
-            '<button type="button" class="btn-danger-sm btn-remove-include">Remove Include</button>' +
+          '<div class="field span-2">' +
+            '<label>Path<span class="req">*</span></label>' +
+            '<input class="inc-path" type="text" value="' + esc(inc.path) + '" required placeholder="/sitecore/...">' +
+          '</div>' +
+          '<div class="field">' +
+            '<label>Database</label>' +
+            '<select class="inc-database">' + dbOpts + '</select>' +
+          '</div>' +
+          '<div class="field">' +
+            '<label>Scope</label>' +
+            '<select class="inc-scope">' +
+              '<option value=""' + (!inc.scope ? ' selected' : '') + '>— Not set (default: ItemAndDescendants) —</option>' +
+              opted(inc.scope, ['SingleItem', 'ItemAndChildren', 'ItemAndDescendants', 'DescendantsOnly', 'Ignored']) +
+            '</select>' +
+          '</div>' +
+          '<div class="field">' +
+            '<label>Allowed Push Operations</label>' +
+            '<select class="inc-push-ops">' + incPushOpts + '</select>' +
+          '</div>' +
+          '<div class="field">' +
+            '<label>Max Relative Path Length (default: 130)</label>' +
+            '<input class="inc-max-depth" type="number" min="1" value="' + esc(inc.maxRelativeDepth) + '" placeholder="Optional">' +
           '</div>' +
         '</div>' +
-        '<div class="include-content">' +
-      '<div class="fields-grid">' +
-        '<div class="field span-2">' +
-          '<label>Name<span class="req">*</span></label>' +
-          '<input class="inc-name" type="text" value="' + esc(inc.name) + '" required placeholder="e.g. Templates.Feature.Module.Name">' +
+        '<div class="rules-section">' +
+          '<div class="rules-header">' +
+            '<h3>Rules</h3>' +
+            '<button type="button" class="btn-secondary-sm btn-add-rule">+ Add Rule</button>' +
+          '</div>' +
+          '<div class="rules-container">' + rulesHtml + '</div>' +
         '</div>' +
-        '<div class="field span-2">' +
-          '<label>Path<span class="req">*</span></label>' +
-          '<input class="inc-path" type="text" value="' + esc(inc.path) + '" required placeholder="/sitecore/...">' +
+            '</div>' +
+          '</div>' +
         '</div>' +
-        '<div class="field">' +
-          '<label>Database</label>' +
-          '<select class="inc-database">' + dbOpts + '</select>' +
-        '</div>' +
-        '<div class="field">' +
-          '<label>Scope</label>' +
-          '<select class="inc-scope">' +
-            '<option value=""' + (!inc.scope ? ' selected' : '') + '>— Not set (default: ItemAndDescendants) —</option>' +
-            opted(inc.scope, ['SingleItem', 'ItemAndChildren', 'ItemAndDescendants', 'DescendantsOnly', 'Ignored']) +
-          '</select>' +
-        '</div>' +
-        '<div class="field">' +
-          '<label>Allowed Push Operations</label>' +
-          '<select class="inc-push-ops">' + incPushOpts + '</select>' +
-        '</div>' +
-        '<div class="field">' +
-          '<label>Max Relative Path Length (default: 130)</label>' +
-          '<input class="inc-max-depth" type="number" min="1" value="' + esc(inc.maxRelativeDepth) + '" placeholder="Optional">' +
-        '</div>' +
-      '</div>' +
-      '<div class="rules-section">' +
-        '<div class="rules-header">' +
-          '<h3>Rules</h3>' +
-          '<button type="button" class="btn-secondary-sm btn-add-rule">+ Add Rule</button>' +
-        '</div>' +
-        '<div class="rules-container">' + rulesHtml + '</div>' +
-      '</div>' +
-        '</div>' +
-    '</div>';
+        treePanelHtml +
+      '</div>';
+  }
+
+  function getIncludeQuickInfoText(scope, path, database) {
+    var parts = [];
+    var effectiveScope = scope || 'ItemAndDescendants';
+    parts.push('[' + esc(effectiveScope) + ']');
+    var dbPath = '';
+    if (database || path) {
+      dbPath = (database || 'master') + ':' + (path || '');
+      parts.push(dbPath);
+    }
+    return parts.length > 0 ? parts.join(' - ') : '';
   }
 
   function excludedFieldsCardHtml(excludedFields) {
@@ -1103,6 +2267,36 @@ button { cursor: pointer; font: inherit; }
   function renderUsers() {
     var container = document.getElementById('users-container');
     container.innerHTML = usersCardHtml(data.users || []);
+  }
+
+  function ensureSavedIncludeTreeControls() {
+    document.querySelectorAll('.include-block').forEach(function(block) {
+      var treeBar = block.querySelector('.include-tree-bar');
+      if (!treeBar) {
+        treeBar = document.createElement('div');
+        treeBar.className = 'include-tree-bar';
+        block.appendChild(treeBar);
+      }
+
+      var existingToggle = treeBar.querySelector('.include-tree-toggle');
+      if (!existingToggle) {
+        var treeToggle = document.createElement('button');
+        treeToggle.type = 'button';
+        treeToggle.className = 'include-tree-toggle';
+        treeToggle.title = 'Show include content tree';
+        treeToggle.setAttribute('aria-pressed', 'false');
+        treeToggle.innerHTML =
+          '<svg class="include-tree-toggle-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+            '<circle cx="4" cy="3" r="1.5" fill="currentColor"></circle>' +
+            '<circle cx="12" cy="8" r="1.5" fill="currentColor"></circle>' +
+            '<circle cx="4" cy="13" r="1.5" fill="currentColor"></circle>' +
+            '<path d="M5.5 3H8.5V8H10.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></path>' +
+            '<path d="M5.5 13H8.5V8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></path>' +
+          '</svg>' +
+          '<span>Show Tree</span>';
+        treeBar.insertBefore(treeToggle, treeBar.firstChild);
+      }
+    });
   }
 
   function focusAndScroll(el) {
@@ -1273,6 +2467,136 @@ button { cursor: pointer; font: inherit; }
       return;
     }
 
+    var moduleJsonPathLink = target.closest('#module-json-path-link');
+    if (moduleJsonPathLink) {
+      evt.preventDefault();
+      vscode.postMessage({ command: 'openModuleJsonPath' });
+      return;
+    }
+
+      // Include tree toggle (saved includes only)
+      var treeToggleButton = target.closest('.include-tree-toggle');
+      if (treeToggleButton) {
+        var includeBlockForTree = treeToggleButton.closest('.include-block');
+        if (!includeBlockForTree) {
+          return;
+        }
+
+        var includeTreeBar = getIncludeTreeBar(includeBlockForTree);
+        if (!includeTreeBar) {
+          return;
+        }
+
+        var isCurrentlyActive = treeToggleButton.classList.contains('is-active');
+        if (isCurrentlyActive) {
+          // Collapse: move button back to bar root, remove panel
+          includeTreeBar.insertBefore(treeToggleButton, includeTreeBar.firstChild);
+          treeToggleButton.classList.remove('is-active');
+          treeToggleButton.setAttribute('aria-pressed', 'false');
+          treeToggleButton.title = 'Show include content tree';
+          var showLabel = treeToggleButton.querySelector('span');
+          if (showLabel) { showLabel.textContent = 'Show Tree'; }
+          var existingPanel = includeTreeBar.querySelector('.include-tree-panel');
+          if (existingPanel) { existingPanel.remove(); }
+          includeTreeBar.classList.remove('is-open');
+          return;
+        }
+
+        // Expand: add panel into bar
+        treeToggleButton.classList.add('is-active');
+        treeToggleButton.setAttribute('aria-pressed', 'true');
+        treeToggleButton.title = 'Hide include content tree';
+        var hideLabel = treeToggleButton.querySelector('span');
+        if (hideLabel) { hideLabel.textContent = 'Hide Tree'; }
+        includeTreeBar.classList.add('is-open');
+
+        var panelInBar = includeTreeBar.querySelector('.include-tree-panel');
+        if (!panelInBar) {
+          panelInBar = document.createElement('div');
+          panelInBar.className = 'include-tree-panel';
+          panelInBar.innerHTML =
+            '<div class="include-tree-toolbar">' +
+              '<button type="button" class="btn-secondary-sm include-tree-refresh" title="Refresh include tree">Refresh Tree</button>' +
+            '</div>' +
+            '<div class="include-tree-status"></div>' +
+            '<div class="include-tree-root"></div>';
+          includeTreeBar.appendChild(panelInBar);
+        }
+
+        // Move the toggle button into the toolbar so it sits next to Refresh Tree (on the left)
+        var toolbar = panelInBar.querySelector('.include-tree-toolbar');
+        if (toolbar && !toolbar.contains(treeToggleButton)) {
+          toolbar.insertBefore(treeToggleButton, toolbar.firstChild);
+        }
+
+        includeTreeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        loadIncludeTree(includeBlockForTree, true);
+        return;
+      }
+
+      // Include tree manual refresh
+      if (target.classList.contains('include-tree-refresh')) {
+        var refreshIncludeBlock = target.closest('.include-block');
+        if (refreshIncludeBlock) {
+          loadIncludeTree(refreshIncludeBlock, true);
+        }
+        return;
+      }
+
+      // Include tree node expand/collapse
+      if (target.classList.contains('include-tree-node-toggle')) {
+        var nodeElement = target.closest('.include-tree-node');
+        var includeBlockForNode = target.closest('.include-block');
+        if (!nodeElement || !includeBlockForNode) {
+          return;
+        }
+
+        var childrenList = nodeElement.querySelector(':scope > .include-tree-list');
+        if (!childrenList) {
+          return;
+        }
+
+        var willExpand = childrenList.hidden;
+        if (willExpand) {
+          childrenList.hidden = false;
+          target.textContent = '▾';
+          target.setAttribute('aria-label', 'Collapse tree node');
+          loadIncludeTreeChildren(includeBlockForNode, nodeElement);
+        } else {
+          childrenList.hidden = true;
+          target.textContent = '▸';
+          target.setAttribute('aria-label', 'Expand tree node');
+        }
+        return;
+      }
+
+      // Include tree item click opens Explain panel
+      var includeTreeItemLabel = target.closest('.include-tree-node-label.is-clickable');
+      if (includeTreeItemLabel) {
+        evt.preventDefault();
+        evt.stopPropagation();
+
+        var includeTreeNode = includeTreeItemLabel.closest('.include-tree-node');
+        if (!includeTreeNode) {
+          return;
+        }
+
+        var includeTreeNodePath = includeTreeNode.dataset.nodePath || '';
+        var includeTreeNodeId = includeTreeNode.dataset.nodeId || '';
+        var includeTreeNodeDatabase = includeTreeNode.dataset.database || 'master';
+        if (!includeTreeNodePath) {
+          return;
+        }
+
+        vscode.postMessage({
+          command: 'openExplainForPath',
+          path: includeTreeNodePath,
+          database: includeTreeNodeDatabase,
+          itemId: includeTreeNodeId
+        });
+        return;
+      }
+
       // Include toggle
       if (target.classList.contains('include-toggle')) {
         var incBlock = target.closest('.include-block');
@@ -1303,10 +2627,14 @@ button { cursor: pointer; font: inherit; }
         return;
       }
 
-    if (target.classList.contains('btn-remove-include')) {
-      var block = target.closest('.include-block');
+    var removeIncludeButton = target.closest('.btn-remove-include');
+    if (removeIncludeButton) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      var block = removeIncludeButton.closest('.include-block');
       if (block) {
-        block.remove();
+        var includeId = block.getAttribute('data-id') || '';
+        vscode.postMessage({ command: 'requestRemoveInclude', includeId: includeId });
       }
       return;
     }
@@ -1436,9 +2764,38 @@ button { cursor: pointer; font: inherit; }
     }
   });
 
+  // Update quick info when include fields change
+  document.addEventListener('change', function(evt) {
+    var target = evt.target;
+    if (!(target instanceof Element)) { return; }
+    
+    if (target.classList.contains('inc-scope') || target.classList.contains('inc-path') || target.classList.contains('inc-database')) {
+      var incBlock = target.closest('.include-block');
+      if (incBlock) {
+        var pathInput = incBlock.querySelector('.inc-path');
+        var scopeSelect = incBlock.querySelector('.inc-scope');
+        var dbSelect = incBlock.querySelector('.inc-database');
+        var quickInfo = incBlock.querySelector('.include-quick-info');
+        
+        if (quickInfo) {
+          var path = pathInput ? pathInput.value : '';
+          var scope = scopeSelect ? scopeSelect.value : '';
+          var db = dbSelect ? dbSelect.value : '';
+          quickInfo.textContent = getIncludeQuickInfoText(scope, path, db);
+        }
+      }
+    }
+  });
+
   document.addEventListener('dragstart', function(evt) {
     var target = evt.target;
     if (!(target instanceof Element)) { return; }
+
+    // Don't drag if clicking on a button or interactive element
+    if (target.tagName === 'BUTTON' || target.closest('button')) {
+      evt.preventDefault();
+      return;
+    }
 
     var dragHandle = target.closest('.include-drag-handle');
     if (!dragHandle) { return; }
@@ -1587,7 +2944,18 @@ button { cursor: pointer; font: inherit; }
       var feedback = document.getElementById('feedback');
       feedback.textContent = 'Saved \u2713';
       feedback.className = 'feedback ok';
+      ensureSavedIncludeTreeControls();
       setTimeout(function() { feedback.textContent = ''; }, 2500);
+      return;
+    }
+
+    if (event.data && event.data.command === 'includeTreeLoaded') {
+      renderIncludeTree(event.data.includeId, event.data);
+      return;
+    }
+
+    if (event.data && event.data.command === 'includeTreeChildrenLoaded') {
+      renderIncludeTreeChildren(event.data.includeId, event.data);
       return;
     }
 
@@ -1599,6 +2967,34 @@ button { cursor: pointer; font: inherit; }
 
       if (event.data.includeName) {
         revealIncludeByName(event.data.includeName);
+      }
+      return;
+    }
+
+    if (event.data && event.data.command === 'removeIncludeConfirmed') {
+      var includeId = String(event.data.includeId || '');
+      if (!includeId) {
+        return;
+      }
+      var includeBlock = document.querySelector('.include-block[data-id="' + includeId + '"]');
+      if (includeBlock) {
+        includeBlock.remove();
+      }
+    }
+
+    if (event.data && event.data.command === 'iconResolved') {
+      var resolvedUrl = event.data.iconUrl;
+      var dataUri = event.data.dataUri;
+      if (resolvedUrl && dataUri) {
+        resolvedIconCache.set(resolvedUrl, dataUri);
+        var imgs = document.querySelectorAll('.include-tree-node-sitecore-icon[data-icon-url]');
+        imgs.forEach(function(img) {
+          if (img.getAttribute('data-icon-url') === resolvedUrl) {
+            img.src = dataUri;
+          }
+        });
+      } else if (resolvedUrl) {
+        resolvedIconCache.set(resolvedUrl, 'failed');
       }
     }
   });

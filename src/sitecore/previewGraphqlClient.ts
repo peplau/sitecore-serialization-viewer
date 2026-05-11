@@ -12,7 +12,19 @@ interface ItemResult {
   itemId: string;
   name: string;
   path: string;
-  template?: { name?: string };
+  iconField?: {
+    value?: string;
+  };
+  fields?: {
+    nodes: Array<{
+      name?: string;
+      value?: string;
+    }>;
+  };
+  template?: {
+    name?: string;
+    icon?: string;
+  };
   children?: {
     nodes: Array<{ itemId: string }>;
   };
@@ -34,6 +46,7 @@ interface ItemByPathResponse {
 }
 
 export class AuthoringGraphqlClient {
+  private static readonly defaultItemIconPath = '/sitecore/shell/-/icon/Applications/16x16/Document.png.aspx';
   private endpoint: string | undefined;
   private baseHeaders: Record<string, string> | undefined;
   private language: string = 'en';
@@ -315,16 +328,27 @@ export class AuthoringGraphqlClient {
   private mapItemResult(item: ItemResult): SitecoreItem {
     const serializationService = SerializationConfigService.getInstance();
     const serializationMatch = serializationService.checkSerializationStatus(item.path);
+    const ownIconField = item.fields?.nodes?.find(field => (field.name || '').toLowerCase() === '__icon');
+    const iconUrl = this.resolveSitecoreIconUrl(item.iconField?.value || ownIconField?.value || item.template?.icon)
+      || this.getDefaultItemIconUrl();
+
+    // If children field is not defined in GraphQL response, assume item might have children (be optimistic).
+    // If children field is defined but empty, trust that it has no children.
+    // This allows expansion even if GraphQL doesn't return child info for certain items.
+    const childrenFieldDefined = item.children !== undefined;
+    const childCount = item.children?.nodes?.length ?? 0;
+    const hasChildren = childrenFieldDefined ? (childCount > 0) : true;
 
     return {
       id: item.itemId,
       name: item.name,
       path: item.path,
+      iconUrl,
       templateId: undefined,
       templateName: item.template?.name,
       sortOrder: undefined,
       displayName: undefined,
-      hasChildren: (item.children?.nodes?.length ?? 0) > 0,
+      hasChildren,
       status: serializationMatch?.status ?? SerializationStatus.Untracked,
       yamlPath: serializationMatch?.yamlPath,
       matchedModule: serializationMatch?.moduleName,
@@ -338,11 +362,106 @@ export class AuthoringGraphqlClient {
     };
   }
 
+  private resolveSitecoreIconUrl(iconValue: string | undefined): string | undefined {
+    const raw = (iconValue || '').trim();
+    if (!raw) {
+      return undefined;
+    }
+
+    if (/^https?:\/\//i.test(raw)) {
+      return raw;
+    }
+
+    if (/^data:/i.test(raw)) {
+      return raw;
+    }
+
+    if (!this.endpoint) {
+      return undefined;
+    }
+
+    let origin: string;
+    try {
+      origin = new URL(this.endpoint).origin;
+    } catch {
+      return undefined;
+    }
+
+    const normalizedRaw = raw.replace(/\\/g, '/');
+
+    // Sitecore commonly returns icon values as ~/icon/...; map that to /-/icon/...
+    if (/^~\/icon\//i.test(normalizedRaw)) {
+      const suffix = normalizedRaw.replace(/^~\/icon\//i, '');
+      return `${origin}/-/icon/${suffix}`;
+    }
+
+    if (/^\/~\/icon\//i.test(normalizedRaw)) {
+      const suffix = normalizedRaw.replace(/^\/~\/icon\//i, '');
+      return `${origin}/-/icon/${suffix}`;
+    }
+
+    // Already in the expected icon route.
+    if (/^\/-\/icon\//i.test(normalizedRaw)) {
+      return `${origin}${normalizedRaw}`;
+    }
+
+    // Absolute site-relative paths can be used as-is.
+    if (/^\//.test(normalizedRaw)) {
+      return `${origin}${normalizedRaw}`;
+    }
+
+    const normalized = normalizedRaw
+      .replace(/^icon\//i, '')
+      .replace(/^\/+/, '');
+
+    if (!normalized) {
+      return undefined;
+    }
+
+    return `${origin}/-/icon/${normalized}`;
+  }
+
+  getDefaultItemIconUrl(): string | undefined {
+    if (!this.endpoint) {
+      return undefined;
+    }
+
+    try {
+      const origin = new URL(this.endpoint).origin;
+      return `${origin}${AuthoringGraphqlClient.defaultItemIconPath}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isTemplateResolutionError(error: unknown): boolean {
+    const msg = error instanceof Error ? error.message : String(error);
+    return msg.includes('Cannot resolve a template') || msg.includes("template doesn't exist");
+  }
+
+  async fetchIconAsDataUri(iconUrl: string): Promise<string | undefined> {
+    try {
+      await this.ensureInitialized();
+      const headers = await this.buildRequestHeaders();
+      const resp = await fetch(iconUrl, { method: 'GET', headers });
+      if (!resp.ok) {
+        return undefined;
+      }
+      const contentType = resp.headers.get('content-type') || 'image/png';
+      const arrayBuffer = await resp.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString('base64');
+      const mimeType = contentType.split(';')[0].trim();
+      return `data:${mimeType};base64,${base64}`;
+    } catch {
+      return undefined;
+    }
+  }
+
   async getItemByPath(path: string): Promise<SitecoreItem | undefined> {
     const normalizedPath = path || '/sitecore';
     const selectedDatabase = this.database || 'master';
 
-    const query = `query ItemByPath($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    template { name }\n    children {\n      nodes {\n        itemId\n      }\n    }\n  }\n}`;
+    const query = `query ItemByPath($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    iconField: field(name: "__Icon") {\n      value\n    }\n    fields(ownFields: true) {\n      nodes {\n        name\n        value\n      }\n    }\n    template {\n      name\n      icon\n    }\n    children {\n      nodes {\n        itemId\n      }\n    }\n  }\n}`;    // Note: if template resolution fails for this item, the error will propagate. Single-item queries are less likely to hit broken templates.
 
     const data = await this.executeQuery<ItemByPathResponse>(query, {
       path: normalizedPath,
@@ -356,7 +475,7 @@ export class AuthoringGraphqlClient {
     const normalizedItemId = itemId.trim();
     const selectedDatabase = this.database || 'master';
 
-    const query = `query ItemById($itemId: ID!, $database: String = "master") {\n  item(where: { itemId: $itemId, database: $database }) {\n    itemId\n    name\n    path\n    template { name }\n    children {\n      nodes {\n        itemId\n      }\n    }\n  }\n}`;
+    const query = `query ItemById($itemId: ID!, $database: String = "master") {\n  item(where: { itemId: $itemId, database: $database }) {\n    itemId\n    name\n    path\n    iconField: field(name: "__Icon") {\n      value\n    }\n    fields(ownFields: true) {\n      nodes {\n        name\n        value\n      }\n    }\n    template {\n      name\n      icon\n    }\n    children {\n      nodes {\n        itemId\n      }\n    }\n  }\n}`;    // Note: if template resolution fails for this item, the error will propagate. Single-item queries are less likely to hit broken templates.
 
     const data = await this.executeQuery<ItemByPathResponse>(query, {
       itemId: normalizedItemId,
@@ -370,21 +489,33 @@ export class AuthoringGraphqlClient {
     const normalizedPath = path || '/sitecore';
     const selectedDatabase = this.database || 'master';
 
-    const query = `query ItemChildren($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    children {\n      nodes {\n        itemId\n        name\n        path\n        template { name }\n        children {\n          nodes {\n            itemId\n          }\n        }\n      }\n    }\n  }\n}`;
+    const queryWithTemplate = `query ItemChildren($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    children {\n      nodes {\n        itemId\n        name\n        path\n        iconField: field(name: "__Icon") {\n          value\n        }\n        fields(ownFields: true) {\n          nodes {\n            name\n            value\n          }\n        }\n        template {\n          name\n          icon\n        }\n        children {\n          nodes {\n            itemId\n          }\n        }\n      }\n    }\n  }\n}`;
+    const queryWithoutTemplate = `query ItemChildren($path: String = "/sitecore", $database: String = "master") {\n  item(where: { path: $path, database: $database }) {\n    itemId\n    name\n    path\n    children {\n      nodes {\n        itemId\n        name\n        path\n        iconField: field(name: "__Icon") {\n          value\n        }\n        fields(ownFields: true) {\n          nodes {\n            name\n            value\n          }\n        }\n        children {\n          nodes {\n            itemId\n          }\n        }\n      }\n    }\n  }\n}`;
 
-    const data = await this.withTiming(
-      'graphql.query.itemChildren',
-      () => this.executeQuery<ItemChildrenResponse>(
-        query,
-        {
-          path: normalizedPath,
-          database: selectedDatabase
-        },
-        traceId
-      ),
-      traceId,
-      `path=${normalizedPath}; database=${selectedDatabase}`
-    );
+    const variables = { path: normalizedPath, database: selectedDatabase };
+    let data: ItemChildrenResponse;
+    try {
+      data = await this.withTiming(
+        'graphql.query.itemChildren',
+        () => this.executeQuery<ItemChildrenResponse>(queryWithTemplate, variables, traceId),
+        traceId,
+        `path=${normalizedPath}; database=${selectedDatabase}`
+      );
+    } catch (error) {
+      if (this.isTemplateResolutionError(error)) {
+        // One or more children have broken templates — retry without template field so
+        // those items still load (they'll use the __Icon field or default icon instead).
+        console.warn(`Template resolution error for children of ${normalizedPath}, retrying without template field.`);
+        data = await this.withTiming(
+          'graphql.query.itemChildren.noTemplate',
+          () => this.executeQuery<ItemChildrenResponse>(queryWithoutTemplate, variables, traceId),
+          traceId,
+          `path=${normalizedPath}; database=${selectedDatabase} (no-template retry)`
+        );
+      } else {
+        throw error;
+      }
+    }
     const children = data.item?.children?.nodes || [];
 
     console.log(`GraphQL query for ${normalizedPath} (${selectedDatabase}): received ${children.length} children`);

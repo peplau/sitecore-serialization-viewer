@@ -88,10 +88,10 @@ export class SerializationConfigService {
           };
         }
 
-        // ItemAndChildren scope: check if item is under the subtree
-        if (subtree.scope === 'ItemAndChildren' || subtree.scope === undefined) {
+        // ItemAndChildren, ItemAndDescendants, or default scope: check if item is under the subtree
+        if (subtree.scope === 'ItemAndChildren' || subtree.scope === 'ItemAndDescendants' || subtree.scope === undefined) {
           if (normalizedItemPath.startsWith(normalizedSubtreePath + '/')) {
-            // Item is a child of the subtree
+            // Item is a descendant of the subtree
             return {
               status: SerializationStatus.Indirect,
               moduleName: module.name,
@@ -144,7 +144,7 @@ export class SerializationConfigService {
           };
         }
 
-        if (subtree.scope === 'ItemAndChildren' || subtree.scope === undefined) {
+        if (subtree.scope === 'ItemAndChildren' || subtree.scope === 'ItemAndDescendants' || subtree.scope === undefined) {
           if (normalizedItemPath.startsWith(normalizedSubtreePath + '/')) {
             return {
               status: SerializationStatus.Indirect,

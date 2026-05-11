@@ -18,17 +18,30 @@ const pendingIconPath: vscode.IconPath = {
   dark: createPendingIconSvg('#c5c5c5')
 };
 
+function createGrayscaleIconUri(dataUri: string): vscode.Uri {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="16" height="16"><filter id="g"><feColorMatrix type="saturate" values="0"/></filter><image href="${dataUri}" width="16" height="16" filter="url(#g)" opacity="0.45"/></svg>`;
+  return vscode.Uri.parse(`data:image/svg+xml;utf8,${encodeURIComponent(svg)}`);
+}
+
+export const DISABLED_ITEM_URI_SCHEME = 'sitecore-item-disabled';
+
 export class SitecoreTreeItem extends vscode.TreeItem {
   constructor(
     public readonly item: SitecoreItem,
-    public readonly collapsibleState: vscode.TreeItemCollapsibleState
+    public readonly collapsibleState: vscode.TreeItemCollapsibleState,
+    iconDataUri?: string
   ) {
     super(item.name, collapsibleState);
 
     this.id = item.path;
     this.tooltip = `${item.path}\nStatus: ${item.status}`;
     // Set icon based on status and serialization content
-    this.iconPath = this.getIconPath(item);
+    this.iconPath = this.getIconPath(item, iconDataUri);
+
+    // Apply a resourceUri so the FileDecorationProvider can dim non-serialized labels
+    if (item.status === SerializationStatus.NotSerialized || item.status === SerializationStatus.Untracked) {
+      this.resourceUri = vscode.Uri.from({ scheme: DISABLED_ITEM_URI_SCHEME, path: item.path });
+    }
 
     // Context value for menus
     this.contextValue = `sitecoreItem.${item.status}`;
@@ -41,9 +54,20 @@ export class SitecoreTreeItem extends vscode.TreeItem {
     };
   }
 
-  private getIconPath(item: SitecoreItem): vscode.IconPath {
+  private getIconPath(item: SitecoreItem, iconDataUri?: string): vscode.IconPath {
     if (item.statusPending) {
       return pendingIconPath;
+    }
+
+    if (iconDataUri) {
+      const isSerialized = item.status === SerializationStatus.Direct || item.status === SerializationStatus.Indirect;
+      if (isSerialized) {
+        const uri = vscode.Uri.parse(iconDataUri);
+        return { light: uri, dark: uri };
+      } else {
+        const grayUri = createGrayscaleIconUri(iconDataUri);
+        return { light: grayUri, dark: grayUri };
+      }
     }
 
     switch (item.status) {

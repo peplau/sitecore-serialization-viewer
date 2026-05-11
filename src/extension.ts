@@ -4,7 +4,7 @@ import { exec as execCallback } from 'child_process';
 import { promisify } from 'util';
 import { ContentTreeProvider } from './tree/contentTreeProvider';
 import { SitecoreItem } from './tree/models';
-import { SitecoreTreeItem } from './tree/treeItem';
+import { SitecoreTreeItem, DISABLED_ITEM_URI_SCHEME } from './tree/treeItem';
 import { ExplainPanel } from './explainPanel';
 import { ModulesPanel } from './modulesPanel';
 import { ModuleItemsPanel } from './moduleItemsPanel';
@@ -25,6 +25,9 @@ export function activate(context: vscode.ExtensionContext) {
 		treeDataProvider: treeProvider,
 		showCollapseAll: true
 	});
+
+	// Prefetch root icon and expand the root node when extension loads
+	void treeProvider.prefetchRootIconAndExpand(treeView);
 
 	const revealPathInTree = async (pathValue: string) => {
 		const rawValue = (pathValue || '').trim();
@@ -130,6 +133,18 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(treeView);
 
+	const disabledItemDecorationProvider = vscode.window.registerFileDecorationProvider({
+		provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+			if (uri.scheme === DISABLED_ITEM_URI_SCHEME) {
+				return {
+					color: new vscode.ThemeColor('disabledForeground')
+				};
+			}
+			return undefined;
+		}
+	});
+	context.subscriptions.push(disabledItemDecorationProvider);
+
 	const expandVisibleBranch = async (node: SitecoreTreeItem): Promise<void> => {
 		if (!node.item.hasChildren) {
 			return;
@@ -178,6 +193,8 @@ export function activate(context: vscode.ExtensionContext) {
 		treeProvider.resetFromScratch();
 		updateDatabaseStatus();
 		updateModuleStatus();
+		// Prefetch root icon and expand the root node after refresh
+		void treeProvider.prefetchRootIconAndExpand(treeView);
 	});
 
 	const selectDatabaseCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.selectDatabase', async () => {

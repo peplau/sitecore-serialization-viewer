@@ -192,8 +192,15 @@ p { margin: 0 0 0.8rem; }
 			? undefined
 			: serializationConfigService.getModuleByName(moduleName);
 		
-		// Use item.moduleJsonPath if available, otherwise try to resolve dynamically
-		let moduleJsonPath = item.moduleJsonPath;
+		// If the explain output identified a specific module, resolve the JSON path from that module name
+		// rather than trusting item.moduleJsonPath, which may point to a different (wrong) module.
+		let moduleJsonPath: string | undefined;
+		if (explainModuleName) {
+			moduleJsonPath = await this.resolveModuleJsonPathByModuleName(explainModuleName);
+		}
+		if (!moduleJsonPath) {
+			moduleJsonPath = item.moduleJsonPath;
+		}
 		if (!moduleJsonPath && moduleName !== 'Unknown') {
 			moduleJsonPath = await this.resolveModuleJsonPathByModuleName(moduleName);
 		}

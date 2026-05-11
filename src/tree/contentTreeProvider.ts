@@ -113,6 +113,8 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
   private moduleItemsTraceCounter = 0;
   private reconcileInFlightByPath: Map<string, Promise<void>> = new Map();
   private scheduledTreeRefresh: ReturnType<typeof setTimeout> | undefined;
+  private iconDataUriCache: Map<string, string> = new Map();
+  private iconFetchInFlight: Set<string> = new Set();
 
   constructor() {
     this.client = new AuthoringGraphqlClient();
@@ -782,6 +784,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         id: 'sitecore-root',
         name: 'sitecore',
         path: '/sitecore',
+        iconUrl: this.client.getDefaultItemIconUrl(),
         hasChildren: true,
         status: SerializationStatus.NotSerialized
       };
@@ -843,6 +846,7 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         id: 'sitecore-root',
         name: 'sitecore',
         path: '/sitecore',
+        iconUrl: this.client.getDefaultItemIconUrl(),
         hasChildren: true,
         status: SerializationStatus.NotSerialized
       };
@@ -879,10 +883,48 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     return undefined;
   }
 
+  private getIconDataUri(iconUrl: string | undefined): string | undefined {
+    if (!iconUrl) {
+      return undefined;
+    }
+    return this.iconDataUriCache.get(iconUrl);
+  }
+
+  private prefetchIcon(iconUrl: string): void {
+    if (this.iconDataUriCache.has(iconUrl) || this.iconFetchInFlight.has(iconUrl)) {
+      return;
+    }
+    this.iconFetchInFlight.add(iconUrl);
+    void (async () => {
+      try {
+        let dataUri = await this.client.fetchIconAsDataUri(iconUrl);
+        if (!dataUri) {
+          const fallback = this.client.getDefaultItemIconUrl();
+          if (fallback && fallback !== iconUrl) {
+            dataUri = await this.client.fetchIconAsDataUri(fallback);
+          }
+        }
+        if (dataUri) {
+          this.iconDataUriCache.set(iconUrl, dataUri);
+          this.scheduleTreeRefresh();
+        }
+      } finally {
+        this.iconFetchInFlight.delete(iconUrl);
+      }
+    })();
+  }
+
   private createTreeItem(item: SitecoreItem): SitecoreTreeItem {
+    const iconDataUri = this.getIconDataUri(item.iconUrl);
+    const iconFetching = !!item.iconUrl && !iconDataUri;
+    if (iconFetching) {
+      this.prefetchIcon(item.iconUrl!);
+    }
+    const displayItem = iconFetching && !item.statusPending ? { ...item, statusPending: true } : item;
     return new SitecoreTreeItem(
-      item,
-      item.hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+      displayItem,
+      item.hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None,
+      iconDataUri
     );
   }
 
@@ -1676,11 +1718,12 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
         id: 'sitecore-root',
         name: 'sitecore',
         path: '/sitecore',
+        iconUrl: this.client.getDefaultItemIconUrl(),
         hasChildren: true,
         status: SerializationStatus.NotSerialized
       };
       this.parentPathByPath.delete('/sitecore');
-      return [new SitecoreTreeItem(rootItem, vscode.TreeItemCollapsibleState.Collapsed)];
+      return [this.createTreeItem(rootItem)];
     }
 
     const basePath = element.item.path;
@@ -1715,6 +1758,25 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this.refresh({ resetState: true });
   }
 
+  async prefetchRootIconAndExpand(treeView?: vscode.TreeView<SitecoreTreeItem>): Promise<void> {
+    try {
+      const roots = await this.getChildren();
+      if (roots.length === 0) {
+        return;
+      }
+      const root = roots[0];
+      if (root.item.iconUrl) {
+        this.prefetchIcon(root.item.iconUrl);
+      }
+      // Expand just the root node (not its children)
+      if (treeView) {
+        await treeView.reveal(root, { expand: true, focus: false, select: false });
+      }
+    } catch (error) {
+      console.warn('Error prefetching root icon:', error);
+    }
+  }
+
   refresh(options?: { resetState?: boolean }): void {
     this.cache.clear();
     this.moduleYamlRoots = [];
@@ -1727,6 +1789,8 @@ export class ContentTreeProvider implements vscode.TreeDataProvider<SitecoreTree
     this.moduleItemsListingCache.clear();
     this.moduleItemsYamlMetadataCache.clear();
     this.reconcileInFlightByPath.clear();
+    this.iconDataUriCache.clear();
+    this.iconFetchInFlight.clear();
 
     if (options?.resetState) {
       this.loadGeneration += 1;

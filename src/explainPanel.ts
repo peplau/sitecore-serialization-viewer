@@ -5,8 +5,6 @@ import { SerializationConfigService } from './sitecore/serializationConfigServic
 import { EditModulePanel } from './editModulePanel';
 
 export class ExplainPanel {
-	public static currentPanel: ExplainPanel | undefined;
-
 	private readonly panel: vscode.WebviewPanel;
 	private readonly extensionUri: vscode.Uri;
 	private readonly onViewItems: (jsonFilePath: string) => Promise<void>;
@@ -31,11 +29,6 @@ export class ExplainPanel {
 	): ExplainPanel {
 		const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : vscode.ViewColumn.One;
 
-		if (ExplainPanel.currentPanel) {
-			ExplainPanel.currentPanel.panel.reveal(column);
-			return ExplainPanel.currentPanel;
-		}
-
 		const panel = vscode.window.createWebviewPanel(
 			'sitecoreSerializationExplain',
 			'Sitecore Explain',
@@ -46,21 +39,18 @@ export class ExplainPanel {
 			}
 		);
 
-		ExplainPanel.currentPanel = new ExplainPanel(panel, extensionUri, onViewItems, resolveModuleJsonPath);
-		ExplainPanel.currentPanel.panel.onDidDispose(() => {
-			ExplainPanel.currentPanel = undefined;
-		});
+		const explainPanel = new ExplainPanel(panel, extensionUri, onViewItems, resolveModuleJsonPath);
 
-		ExplainPanel.currentPanel.panel.webview.onDidReceiveMessage(async message => {
+		explainPanel.panel.webview.onDidReceiveMessage(async message => {
 			if (message.command === 'openYaml' && message.yamlPath) {
-				await ExplainPanel.currentPanel?.openYamlFile(message.yamlPath);
+				await explainPanel.openYamlFile(message.yamlPath);
 			}
 			if (message.command === 'openModuleJson' && (message.moduleName || message.jsonFilePath)) {
 				let resolvedPath = message.jsonFilePath
-					? await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath)
+					? await explainPanel.resolveModuleJsonPath(message.jsonFilePath)
 					: undefined;
 				if (!resolvedPath && message.moduleName) {
-					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+					resolvedPath = await explainPanel.resolveModuleJsonPathByModuleName(message.moduleName);
 				}
 				if (resolvedPath) {
 					const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(resolvedPath));
@@ -69,16 +59,16 @@ export class ExplainPanel {
 				}
 
 				if (message.moduleName) {
-					await ExplainPanel.currentPanel?.openModuleJsonFile(message.moduleName);
+					await explainPanel.openModuleJsonFile(message.moduleName);
 					return;
 				}
 
 				vscode.window.showErrorMessage('Unable to resolve module JSON file.');
 			}
 			if (message.command === 'editModuleByPath' && message.jsonFilePath) {
-				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await explainPanel.resolveModuleJsonPath(message.jsonFilePath);
 				if (!resolvedPath && message.moduleName) {
-					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+					resolvedPath = await explainPanel.resolveModuleJsonPathByModuleName(message.moduleName);
 				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
@@ -87,20 +77,20 @@ export class ExplainPanel {
 				await EditModulePanel.createOrShow(resolvedPath);
 			}
 			if (message.command === 'openIncludeJsonByPath' && message.jsonFilePath && message.includeName) {
-				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await explainPanel.resolveModuleJsonPath(message.jsonFilePath);
 				if (!resolvedPath && message.moduleName) {
-					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+					resolvedPath = await explainPanel.resolveModuleJsonPathByModuleName(message.moduleName);
 				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
 					return;
 				}
-				await ExplainPanel.currentPanel?.openIncludeInModuleJson(resolvedPath, message.includeName, message.rulePath);
+				await explainPanel.openIncludeInModuleJson(resolvedPath, message.includeName, message.rulePath);
 			}
 			if (message.command === 'editModuleIncludeByPath' && message.jsonFilePath && message.includeName) {
-				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await explainPanel.resolveModuleJsonPath(message.jsonFilePath);
 				if (!resolvedPath && message.moduleName) {
-					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+					resolvedPath = await explainPanel.resolveModuleJsonPathByModuleName(message.moduleName);
 				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
@@ -109,19 +99,19 @@ export class ExplainPanel {
 				await EditModulePanel.createOrShow(resolvedPath, { includeName: message.includeName, rulePath: message.rulePath });
 			}
 			if (message.command === 'viewItemsByPath' && message.jsonFilePath) {
-				let resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPath(message.jsonFilePath);
+				let resolvedPath = await explainPanel.resolveModuleJsonPath(message.jsonFilePath);
 				if (!resolvedPath && message.moduleName) {
-					resolvedPath = await ExplainPanel.currentPanel?.resolveModuleJsonPathByModuleName(message.moduleName);
+					resolvedPath = await explainPanel.resolveModuleJsonPathByModuleName(message.moduleName);
 				}
 				if (!resolvedPath) {
 					vscode.window.showErrorMessage(`Unable to resolve module JSON file: ${message.jsonFilePath}`);
 					return;
 				}
-				await ExplainPanel.currentPanel?.onViewItems(resolvedPath);
+				await explainPanel.onViewItems(resolvedPath);
 			}
 		});
 
-		return ExplainPanel.currentPanel;
+		return explainPanel;
 	}
 
 	public async update(item: SitecoreItem, explainOutput: string): Promise<void> {

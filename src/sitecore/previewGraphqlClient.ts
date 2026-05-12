@@ -333,11 +333,12 @@ export class AuthoringGraphqlClient {
       || this.getDefaultItemIconUrl();
 
     // If children field is not defined in GraphQL response, assume item might have children (be optimistic).
-    // If children field is defined but empty, trust that it has no children.
-    // This allows expansion even if GraphQL doesn't return child info for certain items.
+    // If children field is defined but empty, we still keep known container templates expandable
+    // because Authoring GraphQL can under-report child probes for some folder-like items.
     const childrenFieldDefined = item.children !== undefined;
     const childCount = item.children?.nodes?.length ?? 0;
-    const hasChildren = childrenFieldDefined ? (childCount > 0) : true;
+    const hasChildrenByProbe = childrenFieldDefined ? (childCount > 0) : true;
+    const hasChildren = hasChildrenByProbe || this.isLikelyContainerItem(item);
 
     return {
       id: item.itemId,
@@ -360,6 +361,16 @@ export class AuthoringGraphqlClient {
       subtreePushOperations: serializationMatch?.subtreePushOperations,
       subtreeDatabase: serializationMatch?.subtreeDatabase
     };
+  }
+
+  private isLikelyContainerItem(item: ItemResult): boolean {
+    const templateName = (item.template?.name || '').toLowerCase();
+    if (templateName.includes('folder') || templateName.includes('bucket')) {
+      return true;
+    }
+
+    const itemName = (item.name || '').toLowerCase();
+    return itemName === 'media';
   }
 
   private resolveSitecoreIconUrl(iconValue: string | undefined): string | undefined {

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { AuthoringGraphqlClient } from './sitecore/previewGraphqlClient';
 import { SitecoreItem, SerializationStatus } from './tree/models';
 import { Buffer } from 'buffer';
@@ -96,6 +97,7 @@ interface IncludeTreeLoadMessage {
   command: 'loadIncludeTree';
   requestId: string;
   includeId: string;
+  includeName?: string;
   includePath: string;
   database?: string;
 }
@@ -104,8 +106,14 @@ interface IncludeTreeChildrenMessage {
   command: 'loadIncludeTreeChildren';
   requestId: string;
   includeId: string;
+  includeName?: string;
   parentPath: string;
   database?: string;
+}
+
+interface IncludeSerializationScope {
+  includeName: string;
+  directPaths: Set<string>;
 }
 
 interface ShowDetailsMessage {
@@ -136,6 +144,8 @@ export class EditModulePanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly jsonFileUri: vscode.Uri;
   private readonly graphqlClient = new AuthoringGraphqlClient();
+  private readonly includeScopeByIncludeId: Map<string, IncludeSerializationScope> = new Map();
+  private readonly includeScopeCache: Map<string, Promise<IncludeSerializationScope>> = new Map();
   private rawJson: ModuleFileJson = { namespace: '' };
   private pendingRevealIncludeName: string | undefined;
   private pendingRevealRulePath: string | undefined;
@@ -419,6 +429,133 @@ export class EditModulePanel {
     return (database || '').trim() || 'master';
   }
 
+  private normalizePath(pathValue: string): string {
+    const trimmed = (pathValue || '').trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    const withoutTrailing = trimmed.length > 1 ? trimmed.replace(/\/+$/, '') : trimmed;
+    return withoutTrailing.toLowerCase();
+  }
+
+  private decodeYamlScalar(rawValue: string): string {
+    const trimmed = (rawValue || '').trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+      const inner = trimmed.substring(1, trimmed.length - 1);
+      return inner.replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+    }
+
+    if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+      const inner = trimmed.substring(1, trimmed.length - 1);
+      return inner.replace(/''/g, "'").trim();
+    }
+
+    return trimmed;
+  }
+
+  private extractSerializedPathFromYaml(content: string): string | undefined {
+    const match = /^Path:\s*(.+)$/im.exec(content);
+    if (!match) {
+      return undefined;
+    }
+
+    const decoded = this.decodeYamlScalar(match[1]);
+    const normalized = this.normalizePath(decoded);
+    return normalized || undefined;
+  }
+
+  private async collectYamlFiles(root: vscode.Uri): Promise<vscode.Uri[]> {
+    const entries = await vscode.workspace.fs.readDirectory(root);
+    const results: vscode.Uri[] = [];
+
+    for (const [name, type] of entries) {
+      const childUri = vscode.Uri.joinPath(root, name);
+      if (type === vscode.FileType.Directory) {
+        const childFiles = await this.collectYamlFiles(childUri);
+        results.push(...childFiles);
+      } else if (type === vscode.FileType.File && name.toLowerCase().endsWith('.yml')) {
+        results.push(childUri);
+      }
+    }
+
+    return results;
+  }
+
+  private async buildIncludeSerializationScope(includeName: string): Promise<IncludeSerializationScope> {
+    const normalizedIncludeName = (includeName || '').trim();
+    if (!normalizedIncludeName) {
+      return { includeName: '', directPaths: new Set<string>() };
+    }
+
+    const moduleDirectory = path.dirname(this.jsonFileUri.fsPath);
+    const includeFolderUri = vscode.Uri.file(path.join(moduleDirectory, 'items', normalizedIncludeName));
+    const directPaths = new Set<string>();
+
+    try {
+      const yamlFiles = await this.collectYamlFiles(includeFolderUri);
+      for (const yamlFile of yamlFiles) {
+        try {
+          const bytes = await vscode.workspace.fs.readFile(yamlFile);
+          const text = Buffer.from(bytes).toString('utf8');
+          const serializedPath = this.extractSerializedPathFromYaml(text);
+          if (serializedPath) {
+            directPaths.add(serializedPath);
+          }
+        } catch {
+          // Ignore unreadable yaml files and continue with the rest.
+        }
+      }
+    } catch {
+      // Missing include folder should behave as "no serialized items for this include".
+    }
+
+    return {
+      includeName: normalizedIncludeName,
+      directPaths
+    };
+  }
+
+  private async resolveIncludeSerializationScope(includeName: string, database: string): Promise<IncludeSerializationScope> {
+    const scopeKey = `${(includeName || '').trim().toLowerCase()}|${this.normalizeDatabase(database).toLowerCase()}`;
+    let cached = this.includeScopeCache.get(scopeKey);
+    if (!cached) {
+      cached = this.buildIncludeSerializationScope(includeName);
+      this.includeScopeCache.set(scopeKey, cached);
+    }
+
+    return cached;
+  }
+
+  private applyIncludeScopedStatus(item: SitecoreItem, scope: IncludeSerializationScope): SitecoreItem {
+    const normalizedItemPath = this.normalizePath(item.path);
+    if (!normalizedItemPath) {
+      return {
+        ...item,
+        status: SerializationStatus.NotSerialized,
+        yamlPath: undefined
+      };
+    }
+
+    if (scope.directPaths.has(normalizedItemPath)) {
+      return {
+        ...item,
+        status: SerializationStatus.Direct,
+        yamlPath: item.yamlPath || `${scope.includeName}:${item.path}`
+      };
+    }
+
+    return {
+      ...item,
+      status: SerializationStatus.NotSerialized,
+      yamlPath: undefined
+    };
+  }
+
   private getPathNodeLabel(pathValue: string): string {
     const normalized = (pathValue || '').trim();
     if (!normalized) {
@@ -443,7 +580,8 @@ export class EditModulePanel {
 
   private async mapItemToTreeNode(
     item: SitecoreItem,
-    database: string
+    database: string,
+    scope?: IncludeSerializationScope
   ): Promise<IncludeTreeNodeDto> {
     let iconDataUri: string | undefined;
     if (item.iconUrl) {
@@ -453,19 +591,22 @@ export class EditModulePanel {
         // Ignore icon fetch errors; fall back to SVG rendering
       }
     }
-    return this.mapTreeNode(item, database, iconDataUri);
+
+    const scopedItem = scope ? this.applyIncludeScopedStatus(item, scope) : item;
+    return this.mapTreeNode(scopedItem, database, iconDataUri);
   }
 
-  private async buildIncludeTreeChildren(path: string, database: string): Promise<IncludeTreeNodeDto[]> {
+  private async buildIncludeTreeChildren(path: string, database: string, scope?: IncludeSerializationScope): Promise<IncludeTreeNodeDto[]> {
     const children: SitecoreItem[] = await this.graphqlClient.getChildren(path);
     return Promise.all(
-      children.map((item: SitecoreItem) => this.mapItemToTreeNode(item, database))
+      children.map((item: SitecoreItem) => this.mapItemToTreeNode(item, database, scope))
     );
   }
 
   private async handleLoadIncludeTree(message: IncludeTreeLoadMessage): Promise<void> {
     const requestId = message.requestId;
     const includeId = message.includeId;
+    const includeName = (message.includeName || '').trim();
     const includePath = (message.includePath || '').trim();
     const database = this.normalizeDatabase(message.database);
 
@@ -482,6 +623,8 @@ export class EditModulePanel {
     try {
       this.graphqlClient.setDatabase(database);
       const includePathItem = await this.graphqlClient.getItemByPath(includePath);
+      const scope = await this.resolveIncludeSerializationScope(includeName, database);
+      this.includeScopeByIncludeId.set(includeId, scope);
 
       const root: IncludeTreeNodeDto = {
         kind: 'database',
@@ -501,6 +644,10 @@ export class EditModulePanel {
         }
       }
 
+      const scopedIncludePathItem = includePathItem
+        ? this.applyIncludeScopedStatus(includePathItem, scope)
+        : undefined;
+
       const includePathNode: IncludeTreeNodeDto = includePathItem
         ? {
           kind: 'item',
@@ -508,8 +655,8 @@ export class EditModulePanel {
           path: includePath,
           database,
            hasChildren: includePathItem?.hasChildren ?? false,
-          status: includePathItem.status,
-          yamlPath: includePathItem.yamlPath,
+          status: scopedIncludePathItem?.status ?? SerializationStatus.NotSerialized,
+          yamlPath: scopedIncludePathItem?.yamlPath,
           iconDataUri: includePathIconDataUri
         }
         : {
@@ -541,6 +688,7 @@ export class EditModulePanel {
   private async handleLoadIncludeTreeChildren(message: IncludeTreeChildrenMessage): Promise<void> {
     const requestId = message.requestId;
     const includeId = message.includeId;
+    const includeName = (message.includeName || '').trim();
     const parentPath = (message.parentPath || '').trim();
     const database = this.normalizeDatabase(message.database);
 
@@ -557,7 +705,11 @@ export class EditModulePanel {
 
     try {
       this.graphqlClient.setDatabase(database);
-      const children = await this.buildIncludeTreeChildren(parentPath, database);
+      const scope = this.includeScopeByIncludeId.get(includeId)
+        ?? await this.resolveIncludeSerializationScope(includeName, database);
+      this.includeScopeByIncludeId.set(includeId, scope);
+
+      const children = await this.buildIncludeTreeChildren(parentPath, database, scope);
 
       void this.panel.webview.postMessage({
         command: 'includeTreeChildrenLoaded',
@@ -1183,15 +1335,19 @@ button { cursor: pointer; font: inherit; }
   color: inherit;
   object-fit: contain;
   flex-shrink: 0;
+  filter: none;
+  opacity: 1;
 }
 .include-tree-node-label.status-direct,
 .include-tree-node-label.status-indirect,
-.include-tree-node-label.status-untracked,
-.include-tree-node-label.status-not-serialized,
-.include-tree-node-label.status-loading,
 .include-tree-node-label.node-kind-database,
 .include-tree-node-label.node-kind-path {
   color: var(--vscode-list-foreground, var(--text));
+}
+.include-tree-node-label.status-untracked,
+.include-tree-node-label.status-not-serialized,
+.include-tree-node-label.status-loading {
+  color: var(--vscode-disabledForeground, #8c8c8c);
 }
 .include-tree-node-icon-wrap .include-tree-node-icon {
   color: var(--vscode-symbolIcon-folderForeground, var(--vscode-list-foreground, var(--text)));
@@ -1206,6 +1362,12 @@ button { cursor: pointer; font: inherit; }
 .include-tree-node-icon-wrap.status-not-serialized .include-tree-node-icon,
 .include-tree-node-icon-wrap.status-loading .include-tree-node-icon {
   color: var(--vscode-disabledForeground, #8c8c8c);
+}
+.include-tree-node-icon-wrap.status-untracked .include-tree-node-icon-img,
+.include-tree-node-icon-wrap.status-not-serialized .include-tree-node-icon-img,
+.include-tree-node-icon-wrap.status-loading .include-tree-node-icon-img {
+  filter: grayscale(1);
+  opacity: 0.45;
 }
 .include-tree-node-icon-wrap.node-kind-path .include-tree-node-icon {
   color: var(--vscode-charts-orange, #ce9178);
@@ -1440,8 +1602,10 @@ button { cursor: pointer; font: inherit; }
     }
 
     var includePathInput = includeBlock.querySelector('.inc-path');
+    var includeNameInput = includeBlock.querySelector('.inc-name');
     var includeDbSelect = includeBlock.querySelector('.inc-database');
     var includeId = includeBlock.getAttribute('data-id') || '';
+    var includeName = includeNameInput ? String(includeNameInput.value || '').trim() : '';
     var includePath = includePathInput ? String(includePathInput.value || '').trim() : '';
     var includeDatabase = includeDbSelect ? String(includeDbSelect.value || '').trim() : '';
     var database = includeDatabase || 'master';
@@ -1474,6 +1638,7 @@ button { cursor: pointer; font: inherit; }
       command: 'loadIncludeTree',
       requestId: requestId,
       includeId: includeId,
+      includeName: includeName,
       includePath: includePath,
       database: database
     });
@@ -1494,6 +1659,8 @@ button { cursor: pointer; font: inherit; }
     }
 
     var includeId = includeBlock.getAttribute('data-id') || '';
+    var includeNameInput = includeBlock.querySelector('.inc-name');
+    var includeName = includeNameInput ? String(includeNameInput.value || '').trim() : '';
     var parentPath = nodeElement.dataset.nodePath || '';
     var database = nodeElement.dataset.database || 'master';
     var requestId = nextIncludeTreeRequestId();
@@ -1508,6 +1675,7 @@ button { cursor: pointer; font: inherit; }
       command: 'loadIncludeTreeChildren',
       requestId: requestId,
       includeId: includeId,
+      includeName: includeName,
       parentPath: parentPath,
       database: database
     });

@@ -531,11 +531,11 @@ export class AuthoringGraphqlClient {
 
     console.log(`GraphQL query for ${normalizedPath} (${selectedDatabase}): received ${children.length} children`);
 
+    const nonSelfChildren = children.filter(child => child.path !== normalizedPath);
+
     const items = await this.withTiming(
       'graphql.children.mapResult',
-      () => children
-        .filter(child => child.path !== normalizedPath) // Prevent self-reference
-        .map(child => this.mapItemResult(child)),
+      () => nonSelfChildren.map(child => this.mapItemResult(child)),
       traceId,
       `path=${normalizedPath}; count=${children.length}`
     );

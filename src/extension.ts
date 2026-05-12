@@ -8,7 +8,106 @@ import { SitecoreTreeItem, DISABLED_ITEM_URI_SCHEME } from './tree/treeItem';
 import { ExplainPanel } from './explainPanel';
 import { ModulesPanel } from './modulesPanel';
 import { ModuleItemsPanel } from './moduleItemsPanel';
+import { EditModulePanel } from './editModulePanel';
 import { initializePerfOutputIfEnabled, resetPerfOutputFromEnv } from './perfOutput';
+
+type ModuleEditRevealSection = 'module' | 'includes' | 'excludedFields' | 'roles' | 'users';
+
+interface ModuleEditRevealTarget {
+	section: ModuleEditRevealSection;
+	includeName?: string;
+	rulePath?: string;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function leadingWhitespaceLength(value: string): number {
+	const match = /^(\s*)/.exec(value);
+	return match ? match[1].length : 0;
+}
+
+function extractJsonStringProperty(line: string, propertyName: string): string | undefined {
+	const match = new RegExp(`^\\s*"${escapeRegExp(propertyName)}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"\\s*,?\\s*$`).exec(line);
+	if (!match) {
+		return undefined;
+	}
+
+	try {
+		return JSON.parse(`"${match[1]}"`) as string;
+	} catch {
+		return match[1];
+	}
+}
+
+function resolveModuleEditRevealTarget(document: vscode.TextDocument, lineNumber: number): ModuleEditRevealTarget {
+	const lines = Array.from({ length: document.lineCount }, (_, index) => document.lineAt(index).text);
+	const knownSections: Array<{ key: string; section: ModuleEditRevealSection }> = [
+		{ key: 'includes', section: 'includes' },
+		{ key: 'excludedFields', section: 'excludedFields' },
+		{ key: 'roles', section: 'roles' },
+		{ key: 'users', section: 'users' }
+	];
+
+	let section: ModuleEditRevealSection = 'module';
+	let sectionLineIndex = -1;
+	for (let index = lineNumber; index >= 0; index -= 1) {
+		const sectionMatch = /^\s*"([^"]+)"\s*:\s*[\[{]/.exec(lines[index]);
+		if (!sectionMatch) {
+			continue;
+		}
+
+		const matchedSection = knownSections.find(candidate => candidate.key === sectionMatch[1]);
+		if (matchedSection) {
+			section = matchedSection.section;
+			sectionLineIndex = index;
+			break;
+		}
+	}
+
+	if (section !== 'includes' || sectionLineIndex < 0) {
+		return { section };
+	}
+
+	const includeSectionIndent = leadingWhitespaceLength(lines[sectionLineIndex]);
+	let includeName: string | undefined;
+	let includeNameLineIndex = -1;
+	let includeNameIndent = includeSectionIndent;
+	for (let index = lineNumber; index >= sectionLineIndex; index -= 1) {
+		const nameValue = extractJsonStringProperty(lines[index], 'name');
+		if (typeof nameValue !== 'string') {
+			continue;
+		}
+
+		const lineIndent = leadingWhitespaceLength(lines[index]);
+		if (lineIndent > includeSectionIndent) {
+			includeName = nameValue;
+			includeNameLineIndex = index;
+			includeNameIndent = lineIndent;
+			break;
+		}
+	}
+
+	if (!includeName) {
+		return { section };
+	}
+
+	let rulePath: string | undefined;
+	for (let index = lineNumber; index >= includeNameLineIndex; index -= 1) {
+		const pathValue = extractJsonStringProperty(lines[index], 'path');
+		if (typeof pathValue !== 'string') {
+			continue;
+		}
+
+		if (leadingWhitespaceLength(lines[index]) > includeNameIndent) {
+			rulePath = pathValue;
+			break;
+		}
+	}
+
+	return rulePath ? { section, includeName, rulePath } : { section, includeName };
+}
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -297,6 +396,23 @@ export function activate(context: vscode.ExtensionContext) {
 		panel.update(modules);
 	});
 
+	const openModuleInEditUiCommand = vscode.commands.registerCommand('sitecore-serialization-viewer.openModuleInEditUi', async () => {
+		const editor = vscode.window.activeTextEditor;
+		if (!editor) {
+			vscode.window.showWarningMessage('Open a JSON file first.');
+			return;
+		}
+
+		const document = editor.document;
+		if (document.languageId !== 'json') {
+			vscode.window.showWarningMessage('This command is available for JSON files only.');
+			return;
+		}
+
+		const target = resolveModuleEditRevealTarget(document, editor.selection.active.line);
+		await EditModulePanel.createOrShow(document.fileName, target);
+	});
+
 	vscode.window.registerWebviewPanelSerializer('sitecoreSerializationExplain', {
 		deserializeWebviewPanel: async (panel, state) => {
 			// No-op for now
@@ -378,7 +494,8 @@ export function activate(context: vscode.ExtensionContext) {
 		selectModuleCommand,
 		copyPathCommand,
 		showDetailsCommand,
-		showAllModulesCommand
+		showAllModulesCommand,
+		openModuleInEditUiCommand
 	);
 }
 

@@ -11,7 +11,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:sitecoreContentTree"
+    "onView:sitecoreContentTree",
+    "onCommand:sitecore-serialization-viewer.openModuleInEditUi"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -88,6 +89,10 @@
         "command": "sitecore-serialization-viewer.showAllModules",
         "title": "Show all modules",
         "icon": "$(library)"
+      },
+      {
+        "command": "sitecore-serialization-viewer.openModuleInEditUi",
+        "title": "Open in Module Edition UI"
       }
     ],
     "views": {
@@ -123,6 +128,13 @@
           "command": "sitecore-serialization-viewer.copyPath",
           "when": "view == sitecoreContentTree",
           "group": "7_modification"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sitecore-serialization-viewer.openModuleInEditUi",
+          "when": "editorTextFocus && resourceExtname == .json",
+          "group": "navigation"
         }
       ]
     }

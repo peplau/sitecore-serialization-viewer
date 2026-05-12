@@ -128,6 +128,14 @@ interface OpenJsonMessage {
   includeName?: string;
 }
 
+type EditModuleRevealSection = 'module' | 'includes' | 'excludedFields' | 'roles' | 'users';
+
+interface EditModuleRevealOptions {
+  section?: EditModuleRevealSection;
+  includeName?: string;
+  rulePath?: string;
+}
+
 interface IncludeTreeNodeDto {
   kind: 'database' | 'path' | 'item';
   label: string;
@@ -153,6 +161,7 @@ export class EditModulePanel {
   private readonly includeScopeByIncludeId: Map<string, IncludeSerializationScope> = new Map();
   private readonly includeScopeCache: Map<string, Promise<IncludeSerializationScope>> = new Map();
   private rawJson: ModuleFileJson = { namespace: '' };
+  private pendingRevealSection: EditModuleRevealSection | undefined;
   private pendingRevealIncludeName: string | undefined;
   private pendingRevealRulePath: string | undefined;
 
@@ -262,13 +271,18 @@ export class EditModulePanel {
     }
   }
 
-  public static async createOrShow(jsonFilePath: string, options?: { includeName?: string; rulePath?: string }): Promise<void> {
+  public static async createOrShow(jsonFilePath: string, options?: EditModuleRevealOptions): Promise<void> {
     const key = jsonFilePath.toLowerCase();
     const existing = EditModulePanel.panels.get(key);
     if (existing) {
       existing.panel.reveal(vscode.ViewColumn.Active);
-      if (options?.includeName || options?.rulePath) {
-        existing.panel.webview.postMessage({ command: 'revealInclude', includeName: options?.includeName, rulePath: options?.rulePath });
+      if (options?.section || options?.includeName || options?.rulePath) {
+        existing.panel.webview.postMessage({
+          command: 'revealInclude',
+          section: options?.section,
+          includeName: options?.includeName,
+          rulePath: options?.rulePath
+        });
       }
       return;
     }
@@ -284,6 +298,7 @@ export class EditModulePanel {
     );
 
     const instance = new EditModulePanel(panel, jsonFileUri);
+    instance.pendingRevealSection = options?.section;
     instance.pendingRevealIncludeName = options?.includeName;
     instance.pendingRevealRulePath = options?.rulePath;
     EditModulePanel.panels.set(key, instance);
@@ -870,6 +885,7 @@ export class EditModulePanel {
   }
 
   private buildHtml(): string {
+    const initialRevealSectionJson = JSON.stringify(this.pendingRevealSection ?? '');
     const initialRevealIncludeNameJson = JSON.stringify(this.pendingRevealIncludeName ?? '');
     const initialRevealRulePathJson = JSON.stringify(this.pendingRevealRulePath ?? '');
     return `<!DOCTYPE html>
@@ -1041,6 +1057,17 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
   border-radius: 8px;
   padding: 14px;
   margin-bottom: 10px;
+}
+.reveal-target {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 72%, transparent), 0 0 0 7px color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: 2px;
+  animation: revealPulse 1.8s ease-out 1;
+}
+@keyframes revealPulse {
+  0% { transform: translateY(0); }
+  30% { transform: translateY(-1px); }
+  100% { transform: translateY(0); }
 }
 .rule-fields {
   display: grid;
@@ -1573,6 +1600,7 @@ button { cursor: pointer; font: inherit; }
 <script type="application/json" id="initial-data">${this.buildInitialDataJson()}</script>
 <script>
   const vscode = acquireVsCodeApi();
+  const initialRevealSection = ${initialRevealSectionJson};
   const initialRevealIncludeName = ${initialRevealIncludeNameJson};
   const initialRevealRulePath = ${initialRevealRulePathJson};
   const data = JSON.parse(document.getElementById('initial-data').textContent);
@@ -2345,6 +2373,30 @@ button { cursor: pointer; font: inherit; }
     }
   }
 
+  var revealTargetTimer = null;
+
+  function clearRevealHighlight() {
+    document.querySelectorAll('.reveal-target').forEach(function(target) {
+      target.classList.remove('reveal-target');
+    });
+
+    if (revealTargetTimer) {
+      clearTimeout(revealTargetTimer);
+      revealTargetTimer = null;
+    }
+  }
+
+  function revealAndHighlight(element) {
+    if (!element) { return; }
+    clearRevealHighlight();
+    element.classList.add('reveal-target');
+    revealTargetTimer = setTimeout(function() {
+      if (element && element.classList) {
+        element.classList.remove('reveal-target');
+      }
+    }, 2200);
+  }
+
   function getStickyHeaderOffset() {
     var header = document.querySelector('.sticky-header');
     return header ? Math.max(0, header.getBoundingClientRect().height) : 0;
@@ -2392,6 +2444,7 @@ button { cursor: pointer; font: inherit; }
     });
 
     if (!targetBlock) {
+      revealSectionByName('includes');
       return;
     }
 
@@ -2402,6 +2455,7 @@ button { cursor: pointer; font: inherit; }
     }
 
     scrollElementBelowStickyHeader(targetBlock, true);
+    revealAndHighlight(targetBlock);
     var includeNameInput = targetBlock.querySelector('.inc-name');
     if (includeNameInput) {
       try {
@@ -2444,6 +2498,7 @@ button { cursor: pointer; font: inherit; }
 
     if (targetRuleBlock) {
       scrollElementBelowStickyHeader(targetRuleBlock, true);
+      revealAndHighlight(targetRuleBlock);
     }
 
     try {
@@ -2451,6 +2506,36 @@ button { cursor: pointer; font: inherit; }
     } catch {
       targetInput.focus();
     }
+  }
+
+  function revealSectionByName(section) {
+    var sectionId = 'section-module';
+
+    switch (section) {
+      case 'includes':
+        sectionId = 'section-includes';
+        break;
+      case 'excludedFields':
+        sectionId = 'section-excluded-fields';
+        break;
+      case 'roles':
+        sectionId = 'section-roles';
+        break;
+      case 'users':
+        sectionId = 'section-users';
+        break;
+      default:
+        sectionId = 'section-module';
+        break;
+    }
+
+    var sectionElement = document.getElementById(sectionId);
+    if (!sectionElement) {
+      return;
+    }
+
+    scrollElementBelowStickyHeader(sectionElement, true);
+    revealAndHighlight(sectionElement);
   }
 
   function clearIncludeDropIndicators() {
@@ -2489,6 +2574,10 @@ button { cursor: pointer; font: inherit; }
   } else if (initialRevealIncludeName) {
     setTimeout(function() {
       revealIncludeByName(initialRevealIncludeName);
+    }, 50);
+  } else if (initialRevealSection) {
+    setTimeout(function() {
+      revealSectionByName(initialRevealSection);
     }, 50);
   }
 
@@ -3006,6 +3095,11 @@ button { cursor: pointer; font: inherit; }
 
       if (event.data.includeName) {
         revealIncludeByName(event.data.includeName);
+        return;
+      }
+
+      if (event.data.section) {
+        revealSectionByName(event.data.section);
       }
     }
   });

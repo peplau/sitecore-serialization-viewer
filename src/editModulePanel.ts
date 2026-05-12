@@ -122,6 +122,12 @@ interface ShowDetailsMessage {
   database?: string;
 }
 
+interface OpenJsonMessage {
+  command: 'openJson';
+  target: 'module' | 'include' | 'roles' | 'users' | 'excludedFields';
+  includeName?: string;
+}
+
 interface IncludeTreeNodeDto {
   kind: 'database' | 'path' | 'item';
   label: string;
@@ -137,7 +143,7 @@ interface IncludeTreeNodeWithChildrenDto extends IncludeTreeNodeDto {
   children: IncludeTreeNodeWithChildrenDto[];
 }
 
-type WebviewMessage = { command: string; data?: ModuleSaveData } | IncludeTreeLoadMessage | IncludeTreeChildrenMessage | ShowDetailsMessage;
+type WebviewMessage = { command: string; data?: ModuleSaveData } | IncludeTreeLoadMessage | IncludeTreeChildrenMessage | ShowDetailsMessage | OpenJsonMessage;
 
 export class EditModulePanel {
   private static readonly panels: Map<string, EditModulePanel> = new Map();
@@ -162,6 +168,11 @@ export class EditModulePanel {
 
       if (this.isShowDetailsMessage(message)) {
         await this.handleShowDetails(message);
+        return;
+      }
+
+      if (this.isOpenJsonMessage(message)) {
+        await this.handleOpenJson(message);
         return;
       }
 
@@ -198,6 +209,10 @@ export class EditModulePanel {
     return message.command === 'showDetails' && 'itemPath' in message && typeof message.itemPath === 'string';
   }
 
+  private isOpenJsonMessage(message: WebviewMessage): message is OpenJsonMessage {
+    return message.command === 'openJson' && 'target' in message && typeof message.target === 'string';
+  }
+
   private buildFallbackItem(pathValue: string): SitecoreItem {
     const normalizedPath = (pathValue || '').trim();
     const segments = normalizedPath.split('/').filter(Boolean);
@@ -227,6 +242,23 @@ export class EditModulePanel {
     } catch (error) {
       const fallbackItem = this.buildFallbackItem(itemPath);
       await vscode.commands.executeCommand('sitecore-serialization-viewer.showDetails', fallbackItem);
+    }
+  }
+
+  private async handleOpenJson(message: OpenJsonMessage): Promise<void> {
+    try {
+      const doc = await vscode.workspace.openTextDocument(this.jsonFileUri);
+      const editor = await vscode.window.showTextDocument(doc, {
+        preview: false
+      });
+
+      const lineIndex = this.findJsonRevealLine(doc, message);
+      const safeLineIndex = Math.max(0, Math.min(lineIndex, doc.lineCount - 1));
+      const lineRange = doc.lineAt(safeLineIndex).range;
+      editor.revealRange(lineRange, vscode.TextEditorRevealType.AtTop);
+      editor.selection = new vscode.Selection(lineRange.start, lineRange.start);
+    } catch (error) {
+      vscode.window.showErrorMessage('Unable to open JSON file: ' + (error instanceof Error ? error.message : String(error)));
     }
   }
 
@@ -437,6 +469,58 @@ export class EditModulePanel {
 
     const withoutTrailing = trimmed.length > 1 ? trimmed.replace(/\/+$/, '') : trimmed;
     return withoutTrailing.toLowerCase();
+  }
+
+  private findJsonRevealLine(doc: vscode.TextDocument, message: OpenJsonMessage): number {
+    const lines: string[] = [];
+    for (let index = 0; index < doc.lineCount; index += 1) {
+      lines.push(doc.lineAt(index).text);
+    }
+
+    switch (message.target) {
+      case 'module':
+        return 0;
+      case 'include': {
+        const includeName = (message.includeName || '').trim();
+        if (includeName) {
+          const includeLine = this.findFirstMatchingLine(lines, new RegExp(`^\\s*"name"\\s*:\\s*"${this.escapeRegExp(includeName)}"\\s*,?\\s*$`));
+          if (includeLine >= 0) {
+            return includeLine;
+          }
+        }
+
+        return this.findFirstMatchingLine(lines, /^\s*"includes"\s*:\s*\[/);
+      }
+      case 'roles':
+        return this.findFirstMatchingLine(lines, /^\s*"roles"\s*:\s*\[/);
+      case 'users':
+        return this.findFirstMatchingLine(lines, /^\s*"users"\s*:\s*\[/);
+      case 'excludedFields':
+        return this.findFirstMatchingLine(lines, /^\s*"excludedFields"\s*:\s*\[/);
+      default:
+        return 0;
+    }
+  }
+
+  private findFirstMatchingLine(lines: string[], pattern: RegExp): number {
+    for (let index = 0; index < lines.length; index += 1) {
+      if (pattern.test(lines[index])) {
+        return index;
+      }
+    }
+
+    return 0;
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private getJsonOpenLinkHtml(target: 'module' | 'include' | 'roles' | 'users' | 'excludedFields', label: string, text: string, extraAttributes = ''): string {
+    return '<button type="button" class="json-open-link" data-json-target="' + this.esc(target) + '"' + extraAttributes + ' aria-label="' + this.esc(label) + '" title="' + this.esc(label) + '">' +
+      '<span class="json-open-link-text">' + this.esc(text) + '</span>' +
+      '<svg viewBox="0 0 16 16" class="json-open-icon" aria-hidden="true"><path d="M3 1.5H9.7L13 4.8V14.5H3V1.5Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"></path><path d="M9.7 1.5V4.8H13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"></path><path d="M6.1 5.5L4.8 7.7L6.1 9.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path><path d="M9.9 5.5L11.2 7.7L9.9 9.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>' +
+    '</button>';
   }
 
   private decodeYamlScalar(rawValue: string): string {
@@ -832,6 +916,40 @@ h3 { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: up
 .sticky-header h1 {
   margin-bottom: 14px;
 }
+.sticky-header h1 {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+.json-open-link {
+  align-items: center;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  justify-content: center;
+  padding: 0;
+}
+.json-open-link:hover {
+  color: var(--vscode-textLink-foreground);
+}
+.json-open-link:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.json-open-link-text {
+  color: inherit;
+  font: inherit;
+}
+.json-open-icon {
+  display: block;
+  height: 16px;
+  width: 16px;
+}
 .card {
   background: var(--card-bg);
   border: 1px solid var(--card-border);
@@ -903,6 +1021,11 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
   letter-spacing: 0.08em;
   color: var(--muted);
 }
+.section-heading-with-icon {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
 .rules-section { margin-top: 20px; }
 .rules-header {
   display: flex;
@@ -970,6 +1093,12 @@ button { cursor: pointer; font: inherit; }
   padding: 10px 28px;
 }
 .btn-save:hover { opacity: 0.88; }
+.btn-save:disabled {
+  background: color-mix(in srgb, var(--accent) 28%, var(--surface) 72%);
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.7;
+}
 .btn-secondary {
   background: transparent;
   border: 1px solid var(--card-border);
@@ -1065,16 +1194,6 @@ button { cursor: pointer; font: inherit; }
   padding: 6px 12px;
 }
 .nav-btn:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.scroll-to-top {
-  background: transparent;
-  border: 1px solid color-mix(in srgb, var(--card-border) 80%, transparent);
-  border-radius: 6px;
-  color: var(--accent);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 4px 10px;
-}
-.scroll-to-top:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .expand-collapse-buttons {
   display: flex;
   align-items: center;
@@ -1101,9 +1220,6 @@ button { cursor: pointer; font: inherit; }
 }
 .include-block.collapsed .include-header {
   border-bottom: none;
-}
-.include-block.collapsed .include-actions-row .scroll-to-top {
-  display: none;
 }
 .include-toggle {
   background: none;
@@ -1268,8 +1384,6 @@ button { cursor: pointer; font: inherit; }
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
   border: 1px solid color-mix(in srgb, var(--vscode-sideBar-border, var(--border)) 70%, transparent);
   border-radius: 8px;
-  max-height: 360px;
-  overflow: auto;
   padding: 8px;
 }
 .include-tree-list {
@@ -1384,7 +1498,7 @@ button { cursor: pointer; font: inherit; }
 </head>
 <body>
 <div class="sticky-header">
-  <h1>Edit Module: <span id="title-ns">${this.esc(this.rawJson.namespace ?? '')}</span></h1>
+  <h1>${this.getJsonOpenLinkHtml('module', 'Open module JSON', 'Edit Module: ' + (this.rawJson.namespace ?? ''))}</h1>
 
   <nav class="nav-links">
     <div class="nav-links-left">
@@ -1433,27 +1547,26 @@ button { cursor: pointer; font: inherit; }
 
 <div id="section-excluded-fields">
   <div class="section-header">
-    <h2>Excluded Fields</h2>
+    ${this.getJsonOpenLinkHtml('excludedFields', 'Open excluded fields JSON', 'Excluded Fields')}
   </div>
   <div id="excluded-fields-container"></div>
 </div>
 
 <div id="section-roles">
   <div class="section-header">
-    <h2>Roles</h2>
+    ${this.getJsonOpenLinkHtml('roles', 'Open roles JSON', 'Roles')}
   </div>
   <div id="roles-container"></div>
 </div>
 
 <div id="section-users">
   <div class="section-header">
-    <h2>Users</h2>
+    ${this.getJsonOpenLinkHtml('users', 'Open users JSON', 'Users')}
   </div>
   <div id="users-container"></div>
 </div>
 
 <div class="form-actions">
-  <button type="button" id="btn-save" class="btn-save">Save Module</button>
   <span id="feedback" class="feedback"></span>
 </div>
 
@@ -1470,10 +1583,29 @@ button { cursor: pointer; font: inherit; }
   let idCounter = data.includes.length;
   let draggedInclude = null;
   let includeTreeRequestCounter = 0;
+  let savedFormState = '';
 
   function nextIncludeTreeRequestId() {
     includeTreeRequestCounter += 1;
     return 'include-tree-' + includeTreeRequestCounter;
+  }
+
+  function getSaveButton() {
+    return document.getElementById('btn-save-top');
+  }
+
+  function updateSaveButtonState() {
+    var saveButton = getSaveButton();
+    if (!saveButton) {
+      return;
+    }
+
+    saveButton.disabled = JSON.stringify(collectData()) === savedFormState;
+  }
+
+  function captureSavedFormState() {
+    savedFormState = JSON.stringify(collectData());
+    updateSaveButtonState();
   }
 
   function getStatusClass(node) {
@@ -1907,6 +2039,14 @@ button { cursor: pointer; font: inherit; }
     return '[' + resolvedScope + '] ' + resolvedDatabase + ':' + resolvedPath;
   }
 
+  function getJsonFileIconMarkup() {
+    return '<svg viewBox="0 0 16 16" class="json-open-icon" aria-hidden="true"><path d="M3 1.5H9.7L13 4.8V14.5H3V1.5Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"></path><path d="M9.7 1.5V4.8H13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"></path><path d="M6.1 5.5L4.8 7.7L6.1 9.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path><path d="M9.9 5.5L11.2 7.7L9.9 9.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+  }
+
+  function jsonOpenLink(target, label, text, extraAttributes) {
+    return '<button type="button" class="json-open-link" data-json-target="' + esc(target) + '"' + (extraAttributes || '') + ' aria-label="' + esc(label) + '" title="' + esc(label) + '"><span class="json-open-link-text">' + esc(text) + '</span>' + getJsonFileIconMarkup() + '</button>';
+  }
+
   function includeHtml(id, inc) {
     var incPushOpts =
       '<option value=""' + (!inc.allowedPushOperations ? ' selected' : '') + '>\u2014 Not set (default: CreateUpdateAndDelete) \u2014</option>' +
@@ -1956,12 +2096,11 @@ button { cursor: pointer; font: inherit; }
             '<div class="include-header include-drag-handle" draggable="true">' +
               '<div class="include-title-row">' +
                 '<button type="button" class="include-toggle">▶</button>' +
-                '<span class="include-name-display">' + esc(inc.name || '(Unnamed)') + '</span>' +
+                jsonOpenLink('include', 'Open include JSON', inc.name || '(Unnamed)', ' data-include-name="' + esc(inc.name || '') + '"') +
               '</div>' +
-              '<div class="include-actions-row">' +
-                '<button type="button" class="scroll-to-top" title="Scroll to top">Scroll to the top</button>' +
-                '<button type="button" class="btn-danger-sm btn-remove-include">Remove Include</button>' +
-              '</div>' +
+                '<div class="include-actions-row">' +
+                  '<button type="button" class="btn-danger-sm btn-remove-include">Remove Include</button>' +
+                '</div>' +
             '</div>' +
             '<div class="include-content">' +
         '<div class="fields-grid">' +
@@ -2012,10 +2151,6 @@ button { cursor: pointer; font: inherit; }
     var excludedFieldsHtml = (excludedFields || []).map(excludedFieldHtml).join('');
 
     return '<div class="excluded-fields-card">' +
-      '<button type="button" class="scroll-to-top" style="position: absolute; top: 14px; right: 14px;" title="Scroll to top">Top</button>' +
-      '<div class="include-header">' +
-        '<span class="include-label">Excluded Fields</span>' +
-      '</div>' +
       '<div class="excluded-fields-section">' +
         '<div class="excluded-fields-header">' +
           '<h3>Fields</h3>' +
@@ -2055,10 +2190,6 @@ button { cursor: pointer; font: inherit; }
   function rolesCardHtml(roles) {
     var rolesHtml = (roles || []).map(rolePredicateHtml).join('');
     return '<div class="roles-card">' +
-      '<button type="button" class="scroll-to-top" style="position: absolute; top: 14px; right: 14px;" title="Scroll to top">Top</button>' +
-      '<div class="include-header">' +
-        '<span class="include-label">Roles</span>' +
-      '</div>' +
       '<div class="roles-section">' +
         '<div class="roles-header">' +
           '<h3>Role Predicates</h3>' +
@@ -2091,10 +2222,6 @@ button { cursor: pointer; font: inherit; }
   function usersCardHtml(users) {
     var usersHtml = (users || []).map(userPredicateHtml).join('');
     return '<div class="roles-card">' +
-      '<button type="button" class="scroll-to-top" style="position: absolute; top: 14px; right: 14px;" title="Scroll to top">Top</button>' +
-      '<div class="include-header">' +
-        '<span class="include-label">Users</span>' +
-      '</div>' +
       '<div class="roles-section">' +
         '<div class="roles-header">' +
           '<h3>User Predicates</h3>' +
@@ -2206,10 +2333,40 @@ button { cursor: pointer; font: inherit; }
 
   function focusAndScroll(el) {
     if (!el) { return; }
-    el.focus();
+    if (typeof el.focus === 'function') {
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        el.focus();
+      }
+    }
     if (typeof el.scrollIntoView === 'function') {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
+  }
+
+  function getStickyHeaderOffset() {
+    var header = document.querySelector('.sticky-header');
+    return header ? Math.max(0, header.getBoundingClientRect().height) : 0;
+  }
+
+  function scrollElementBelowStickyHeader(element, alignToTop) {
+    if (!element || typeof element.getBoundingClientRect !== 'function') {
+      return;
+    }
+
+    var headerOffset = getStickyHeaderOffset() + 12;
+    var rect = element.getBoundingClientRect();
+    var targetTop = window.scrollY + rect.top - headerOffset;
+    if (!alignToTop) {
+      var viewportPadding = 24;
+      var visibleBottom = window.innerHeight - viewportPadding;
+      if (rect.bottom > visibleBottom) {
+        targetTop = window.scrollY + rect.bottom - window.innerHeight + viewportPadding;
+      }
+    }
+
+    window.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
   }
 
   function revealIncludeByName(includeName) {
@@ -2244,10 +2401,14 @@ button { cursor: pointer; font: inherit; }
       toggle.textContent = '▼';
     }
 
-    targetBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    scrollElementBelowStickyHeader(targetBlock, true);
     var includeNameInput = targetBlock.querySelector('.inc-name');
     if (includeNameInput) {
-      includeNameInput.focus();
+      try {
+        includeNameInput.focus({ preventScroll: true });
+      } catch {
+        includeNameInput.focus();
+      }
     }
   }
 
@@ -2282,10 +2443,14 @@ button { cursor: pointer; font: inherit; }
     }
 
     if (targetRuleBlock) {
-      targetRuleBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      scrollElementBelowStickyHeader(targetRuleBlock, true);
     }
 
-    targetInput.focus();
+    try {
+      targetInput.focus({ preventScroll: true });
+    } catch {
+      targetInput.focus();
+    }
   }
 
   function clearIncludeDropIndicators() {
@@ -2315,6 +2480,7 @@ button { cursor: pointer; font: inherit; }
   renderExcludedFields();
   renderRoles();
   renderUsers();
+  captureSavedFormState();
 
   if (initialRevealRulePath) {
     setTimeout(function() {
@@ -2327,48 +2493,68 @@ button { cursor: pointer; font: inherit; }
   }
 
   document.getElementById('namespace').addEventListener('input', function() {
-    document.getElementById('title-ns').textContent = this.value;
+    var titleButton = document.querySelector('.sticky-header .json-open-link-text');
+    if (titleButton) {
+      titleButton.textContent = 'Edit Module: ' + this.value;
+    }
+    updateSaveButtonState();
+  });
+
+  document.addEventListener('input', function() {
+    updateSaveButtonState();
+  });
+
+  document.addEventListener('change', function() {
+    updateSaveButtonState();
   });
 
   document.addEventListener('click', function(evt) {
     var target = evt.target;
     if (!(target instanceof Element)) { return; }
 
-      // Scroll to top
-      if (target.classList.contains('scroll-to-top')) {
+      // Open JSON at the section requested by the icon
+      var jsonTrigger = target.closest('.json-open-link');
+      if (jsonTrigger) {
         evt.preventDefault();
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        evt.stopPropagation();
+        var jsonTarget = jsonTrigger.getAttribute('data-json-target') || 'module';
+        var includeName = jsonTrigger.getAttribute('data-include-name') || '';
+        vscode.postMessage({
+          command: 'openJson',
+          target: jsonTarget,
+          includeName: includeName
+        });
         return;
       }
 
     // Navigation links
     if (target.id === 'nav-module') {
       var moduleSection = document.getElementById('section-module');
-      if (moduleSection) { moduleSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      if (moduleSection) { scrollElementBelowStickyHeader(moduleSection, true); }
       return;
     }
 
     if (target.id === 'nav-includes') {
       var includesSection = document.getElementById('section-includes');
-      if (includesSection) { includesSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      if (includesSection) { scrollElementBelowStickyHeader(includesSection, true); }
       return;
     }
 
     if (target.id === 'nav-excluded-fields') {
       var excludedSection = document.getElementById('section-excluded-fields');
-      if (excludedSection) { excludedSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      if (excludedSection) { scrollElementBelowStickyHeader(excludedSection, true); }
       return;
     }
 
     if (target.id === 'nav-roles') {
       var rolesSection = document.getElementById('section-roles');
-      if (rolesSection) { rolesSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      if (rolesSection) { scrollElementBelowStickyHeader(rolesSection, true); }
       return;
     }
 
     if (target.id === 'nav-users') {
       var usersSection = document.getElementById('section-users');
-      if (usersSection) { usersSection.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      if (usersSection) { scrollElementBelowStickyHeader(usersSection, true); }
       return;
     }
 
@@ -2407,7 +2593,6 @@ button { cursor: pointer; font: inherit; }
           hideLabel.textContent = 'Hide Tree';
         }
         includeTreePanel.hidden = false;
-        includeTreePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         loadIncludeTree(includeBlockForTree, true);
         return;
       }
@@ -2509,6 +2694,7 @@ button { cursor: pointer; font: inherit; }
       var block = target.closest('.include-block');
       if (block) {
         block.remove();
+        updateSaveButtonState();
       }
       return;
     }
@@ -2524,6 +2710,7 @@ button { cursor: pointer; font: inherit; }
           rulesContainer.appendChild(newRule);
           var firstRuleField = newRule && newRule.querySelector ? newRule.querySelector('.rule-path') : null;
           focusAndScroll(firstRuleField);
+          updateSaveButtonState();
         }
       }
       return;
@@ -2531,7 +2718,7 @@ button { cursor: pointer; font: inherit; }
 
     if (target.classList.contains('btn-remove-rule')) {
       var rule = target.closest('.rule-block');
-      if (rule) { rule.remove(); }
+      if (rule) { rule.remove(); updateSaveButtonState(); }
       return;
     }
 
@@ -2544,19 +2731,20 @@ button { cursor: pointer; font: inherit; }
         fieldsContainer.appendChild(newField);
         var firstFieldField = newField && newField.querySelector ? newField.querySelector('.excluded-field-id') : null;
         focusAndScroll(firstFieldField);
+        updateSaveButtonState();
       }
       return;
     }
 
     if (target.classList.contains('btn-remove-excluded-field')) {
       var field = target.closest('.excluded-field-block');
-      if (field) { field.remove(); }
+      if (field) { field.remove(); updateSaveButtonState(); }
       return;
     }
 
     if (target.classList.contains('btn-remove-reference')) {
       var row = target.closest('.reference-row');
-      if (row) { row.remove(); }
+      if (row) { row.remove(); updateSaveButtonState(); }
       return;
     }
 
@@ -2569,12 +2757,13 @@ button { cursor: pointer; font: inherit; }
       rolesList.appendChild(newRole);
       var firstRoleField = newRole && newRole.querySelector ? newRole.querySelector('.role-domain') : null;
       focusAndScroll(firstRoleField);
+      updateSaveButtonState();
       return;
     }
 
     if (target.classList.contains('btn-remove-role')) {
       var role = target.closest('.role-only-block');
-      if (role) { role.remove(); }
+      if (role) { role.remove(); updateSaveButtonState(); }
       return;
     }
 
@@ -2587,12 +2776,13 @@ button { cursor: pointer; font: inherit; }
       usersList.appendChild(newUser);
       var firstUserField = newUser && newUser.querySelector ? newUser.querySelector('.user-domain') : null;
       focusAndScroll(firstUserField);
+      updateSaveButtonState();
       return;
     }
 
     if (target.classList.contains('btn-remove-user')) {
       var user = target.closest('.user-block');
-      if (user) { user.remove(); }
+      if (user) { user.remove(); updateSaveButtonState(); }
       return;
     }
 
@@ -2604,6 +2794,7 @@ button { cursor: pointer; font: inherit; }
       referencesContainer.appendChild(newRef);
       var firstReferenceField = newRef && newRef.querySelector ? newRef.querySelector('.reference-value') : null;
       focusAndScroll(firstReferenceField);
+      updateSaveButtonState();
       return;
     }
 
@@ -2624,16 +2815,17 @@ button { cursor: pointer; font: inherit; }
         if (toggle) { toggle.textContent = '▼'; }
       }
 
-      if (newInclude && typeof newInclude.scrollIntoView === 'function') {
-        newInclude.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (newInclude) {
+        scrollElementBelowStickyHeader(newInclude, true);
       }
 
       var firstIncludeField = newInclude && newInclude.querySelector ? newInclude.querySelector('.inc-name') : null;
       focusAndScroll(firstIncludeField);
+      updateSaveButtonState();
       return;
     }
 
-    if (target.id === 'btn-save' || target.id === 'btn-save-top') {
+    if (target.id === 'btn-save-top') {
       doSave();
     }
   });
@@ -2705,6 +2897,7 @@ button { cursor: pointer; font: inherit; }
       draggedInclude = null;
     }
     clearIncludeDropIndicators();
+    updateSaveButtonState();
   });
 
   function collectData() {
@@ -2790,6 +2983,7 @@ button { cursor: pointer; font: inherit; }
       feedback.textContent = 'Saved \u2713';
       feedback.className = 'feedback ok';
       ensureSavedIncludeTreeControls();
+      captureSavedFormState();
       setTimeout(function() { feedback.textContent = ''; }, 2500);
       return;
     }
